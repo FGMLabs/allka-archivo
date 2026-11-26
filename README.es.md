@@ -55,6 +55,12 @@ npm install
 npx hardhat test
 ```
 
+Eso corre todos los tests: los de cada contrato, secuencias al azar de operaciones sobre los tres contratos juntos y el recorrido completo de la versión 1. La corrida larga, con muchos más casos al azar, es:
+
+```bash
+npx hardhat test solidity --test-profile deep
+```
+
 ## Tecnologías
 
 Solidity 0.8.38, OpenZeppelin Contracts 5.6, Hardhat 3 y Conflux eSpace (testnet con chain ID 71, mainnet con chain ID 1030).

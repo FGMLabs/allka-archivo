@@ -155,6 +155,10 @@ A confirmar por el dueño:
 
 Cómo se probaron: tests de cada función con sus caminos de falla, un token de pago que bloquea cuentas y otro que intenta colarse en medio de una compra, y secuencias al azar sobre los tres contratos juntos que siguen cada peso: qué tiene que tener cada billetera y qué tiene que haber recibido la tesorería. Además un recorrido completo en TypeScript: dos personas compran, se revenden un NFT, una reclama, se carga un drop nuevo, y lo que no debe poder hacerse falla.
 
+Los tres contratos también se rompieron a propósito, una regla por vez: 187 variantes en total (90 de `Prenda`, 57 de `Venta` y 40 de `Mercado`). Los tests detectaron 186. La que queda no cambia nada: en `Mercado` se comprueba dos veces que el NFT siga en manos del vendedor, y sacar una de las dos comprobaciones da el mismo resultado.
+
+El despliegue de los cuatro contratos (con el token de prueba) se probó en una red simulada.
+
 ## Tecnologías
 
 - Contratos: Solidity 0.8.38 con OpenZeppelin Contracts 5.6.1. Compilador, objetivo de EVM (`cancun`) y optimizador fijos en `hardhat.config.ts`.
@@ -202,7 +206,9 @@ npm install
 npx hardhat test
 ```
 
-`npx hardhat build` compila los contratos y `npx tsc --noEmit` revisa los tipos.
+`npx hardhat build` compila los contratos y `npx tsc --noEmit` revisa los tipos. `npx hardhat test solidity --test-profile deep` es la corrida larga de tests, con muchos más casos al azar.
+
+Para probar el despliegue en una red simulada: `npx hardhat ignition deploy ignition/modules/Testnet.ts`. Ese módulo es solo para redes de prueba: despliega un token de prueba y deja a la cuenta que despliega como administración.
 
 Si la máquina no puede descargar el compilador de Solidity, se puede indicar uno local con la variable `ALLKA_SOLC_PATH` (binario nativo o `soljson.js` de la versión 0.8.38).
 

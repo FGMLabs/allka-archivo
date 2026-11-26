@@ -55,6 +55,12 @@ npm install
 npx hardhat test
 ```
 
+That runs every test: unit and fuzz tests of each contract, random sequences of operations over the three contracts together, and the full version 1 journey. The long run, with many more random cases, is:
+
+```bash
+npx hardhat test solidity --test-profile deep
+```
+
 ## Stack
 
 Solidity 0.8.38, OpenZeppelin Contracts 5.6, Hardhat 3 and Conflux eSpace (testnet chain ID 71, mainnet chain ID 1030).

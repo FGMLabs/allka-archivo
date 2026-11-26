@@ -402,6 +402,27 @@ contract MercadoTest is Test {
         assertEq(usdt.balanceOf(alice), 9_800_049);
     }
 
+    /// @dev At the smallest minimum price a market can be deployed with, the fee is one unit, never zero.
+    function test_FeeIsNeverZeroEvenAtTheSmallestPrice() public {
+        Mercado smallest = new Mercado(prenda, 50, MAX_DURATION);
+        vm.prank(admin);
+        prenda.authorizeMarket(address(smallest));
+        _sell(alice, TOKEN);
+        vm.startPrank(alice);
+        prenda.approve(address(smallest), TOKEN);
+        smallest.list(TOKEN, 50, uint48(start + MAX_DURATION));
+        vm.stopPrank();
+        vm.startPrank(bob);
+        usdt.mint(50);
+        usdt.approve(address(smallest), 50);
+        smallest.buy(TOKEN, 50);
+        vm.stopPrank();
+
+        assertEq(usdt.balanceOf(treasury), 1);
+        assertEq(usdt.balanceOf(alice), 49);
+        assertEq(prenda.ownerOf(TOKEN), bob);
+    }
+
     function test_FeeGoesToTheTreasuryInForceAtThatMoment() public {
         address newTreasury = makeAddr("new treasury");
         _sellAndList(alice, TOKEN, PRICE);

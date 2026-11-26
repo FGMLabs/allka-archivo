@@ -724,6 +724,25 @@ contract VentaTest is Test {
         assertEq(prenda.ownerOf(TOKEN), alice);
     }
 
+    /// @dev The pause stops purchases. Loading a drop, and above all cancelling one, keep working.
+    function test_DropsCanBeCreatedAndCancelledWhileSalesArePaused() public {
+        vm.prank(admin);
+        prenda.pause();
+
+        uint32 dropId = _createDrop(TOKEN, 1);
+        uint32 other = _createEarlyDrop(TOKEN + 1, 1);
+        vm.prank(operator);
+        venta.cancelDrop(dropId);
+        vm.prank(admin);
+        venta.cancelDrop(other);
+        vm.prank(admin);
+        venta.setOperator(stranger);
+
+        assertTrue(venta.dropOf(dropId).cancelled);
+        assertTrue(venta.dropOf(other).cancelled);
+        assertEq(venta.operator(), stranger);
+    }
+
     function test_RevertWhen_TheModuleWasRetired() public {
         _createDrop(TOKEN, 1);
         vm.warp(createdAt + DELAY);
