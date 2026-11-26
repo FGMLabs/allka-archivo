@@ -11,8 +11,8 @@ A store with a built-in resale market where each one-of-a-kind allka garment is 
 | Part | What it does |
 |---|---|
 | Garment contract (NFT) | The permanent contract. One NFT per physical garment, with its size. It keeps each drop's storage rules and handles the claim: claiming burns the NFT. |
-| Sale contract | The drops: price in USDT0, opening date and early access for $FGM holders. It charges and delivers the NFT in the same step. |
-| Market contract | Resale: the owner lists a price and another user buys. The payment is split on the spot: 98% to the seller, 2% to FGM. |
+| Sale contract | The drops: each garment with its own price in USDT0, opening date and early access for $FGM holders. It charges and delivers the NFT in the same step. |
+| Market contract | Resale: the owner lists a price and another user buys. The payment is split on the spot: 98% to the seller, 2% to FGM. Offers expire. Nobody administers it. |
 | Website | Next.js on Vercel, in English and Spanish, mobile first. Screens: drops, garment, market, my collection, claim. |
 | Server and database | Holds the catalogue (photos, sizes) and the shipping and billing details, which are only requested at claim time. |
 | Admin panel | Create drops without touching code, see the claims waiting to ship and mark shipments. |
@@ -40,9 +40,9 @@ Every garment is finished, tagged with its NFT number and stored before its drop
 ## The four journeys
 
 1. Buy: connect the wallet, approve the exact USDT0 amount and buy. The buyer states the price they expect to pay; if it changed, the purchase does not go through.
-2. Resell: the first time, the owner gives the Market permission over their NFTs; then they list a price. When another user pays, the NFT changes owner.
+2. Resell: the first time, the owner gives the Market permission over their NFTs; then they list a price and say until when the offer stands. When another user pays, the NFT changes owner. The buyer states the price they expect to pay; if the seller changed it, the purchase does not go through.
 3. Claim: the site first checks that shipping to that country is possible. The owner pays the storage fee if there is one and the NFT is burned. The order is created only from that on-chain burn, and shipping details are valid only if signed by the same wallet that burned. They can be corrected until dispatch.
-4. Create a drop: fill in the panel form, review the values the panel reads back and sign. The drop opens at least 24 hours later and can be cancelled before it opens.
+4. Create a drop: fill in the panel form, review the values the panel reads back and sign. The drop opens at least 24 hours later and can be cancelled before it opens. Once created it cannot be changed.
 
 ## Transfers
 

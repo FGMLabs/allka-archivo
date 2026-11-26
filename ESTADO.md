@@ -8,8 +8,8 @@ Bitácora del proyecto: decisiones, avance y pendientes. Se lee al empezar cada 
 
 - Fase 0 terminada. La arquitectura se aprobó el 26/11/2026, ya corregida tras una revisión de seguridad independiente.
 - Fase 1 en curso (contratos).
-  - Hecho: proyecto Hardhat 3, pruebas automáticas en cada cambio (CI), el token de prueba `TestUSDT0` y el contrato `Prenda` con sus tests.
-  - Falta: contratos `Venta` y `Mercado` con sus tests, revisión independiente de los tres juntos y despliegue en la testnet de Conflux eSpace.
+  - Hecho: proyecto Hardhat 3, pruebas automáticas en cada cambio (CI), el token de prueba `TestUSDT0` y los tres contratos (`Prenda`, `Venta` y `Mercado`) con sus tests. `Prenda` ya pasó por una revisión independiente.
+  - Falta: revisión independiente de `Venta` y `Mercado` y de los tres juntos, y despliegue en la testnet de Conflux eSpace.
 
 ## Decisiones tomadas
 
@@ -31,8 +31,12 @@ Se cargan por drop. En testnet se usan valores de prueba.
 
 - Meses de guarda gratis, valor de la cuota y máximo acumulado.
 - Cuántas horas dura la ventana anticipada y cuánto $FGM hace falta para entrar en la foto.
-- Precio mínimo que acepta el contrato.
 - Direcciones de operador, tesorería y administración.
+
+Se fijan al desplegar cada módulo y después no se pueden cambiar (para cambiarlos se despliega un módulo nuevo):
+
+- `Venta`: precio mínimo de una prenda, tope máximo de guarda que puede poner un drop y demora mínima entre cargar un drop y que abra (24 horas en mainnet).
+- `Mercado`: precio mínimo de una oferta y cuánto puede durar como máximo (propuesta: 30 días).
 
 Para la Fase 4:
 
@@ -124,6 +128,33 @@ Pendientes que salieron al escribirlo:
 - Fase 4: antes de despachar, el servidor tiene que comprobar que el NFT quemado nació de una venta oficial (el aviso de creación dice qué módulo lo creó), además de que la quema esté finalizada.
 - Antes de mainnet: la dirección de administración debería ser una billetera de varias firmas, y hay que vigilar los avisos de cambios de administración (tesorería, módulos de venta y Mercados nuevos).
 
+## Cómo quedaron `Venta` y `Mercado`
+
+`Venta` (la venta primaria):
+
+- Un drop es una lista de prendas, cada una con su número, su precio y la huella de sus datos, más las fechas y las reglas de guarda. Una vez cargado no se puede cambiar. Antes de abrir lo pueden cancelar el operador o la administración, y sus prendas pueden ir a un drop nuevo.
+- Comprar cobra y crea el NFT en la misma operación: el precio va directo de la billetera del comprador a la tesorería. Si algo falla, no pasa nada de las dos cosas.
+- Entrada anticipada: durante esa ventana compra solo quien esté en la foto, una prenda por billetera y por drop. Una compra que falla no gasta el turno.
+- No tiene administración propia: sigue a la de `Prenda`, que solo nombra al operador. La tesorería, la moneda y la pausa son las de `Prenda`.
+- El contrato rechaza un drop que abra antes de la demora mínima, precios por debajo del mínimo, guardas por encima del tope y números ya usados o que estén en otro drop.
+- La demora mínima se fija al desplegar para poder probar en testnet con una corta. En mainnet tiene que ser de 24 horas.
+
+`Mercado` (la reventa):
+
+- El NFT se queda en la billetera de su dueño hasta que se vende. El contrato nunca tiene plata ni NFT.
+- Para publicar hay que haberle dado permiso al Mercado antes. Publicar de nuevo cambia la oferta.
+- Al comprar se reparte el pago: 98% al vendedor y 2% a la tesorería. La comisión está escrita como constante y no hay nadie que administre el contrato: no se puede cambiar. Si un precio no da una comisión exacta, se redondea a favor del vendedor.
+- Una oferta deja de valer si el NFT cambió de manos (aunque después vuelva al vendedor), si venció o si el vendedor la retira.
+- Límite conocido: una oferta queda guardada hasta que se retira, vence o el NFT cambia de manos. Si el vendedor le quita el permiso al Mercado y más adelante se lo vuelve a dar, esa oferta vuelve a poder tomarse al precio viejo. Por eso las ofertas vencen, y el sitio le tiene que mostrar al vendedor todas sus ofertas abiertas.
+- Límite conocido: si el emisor de USDT0 bloqueara la dirección de `Venta` o de `Mercado`, ese módulo deja de poder cobrar. La salida es desplegar uno nuevo.
+
+A confirmar por el dueño:
+
+- Hoy un drop que ya abrió no se puede cerrar: lo que no se vendió queda en venta. Propuesta: que el operador pueda cerrar un drop abierto para dejar de vender lo que queda (por ejemplo, si una prenda se daña).
+- Duración máxima de una oferta de reventa. Propuesta: 30 días.
+
+Cómo se probaron: tests de cada función con sus caminos de falla, un token de pago que bloquea cuentas y otro que intenta colarse en medio de una compra, y secuencias al azar sobre los tres contratos juntos que siguen cada peso: qué tiene que tener cada billetera y qué tiene que haber recibido la tesorería. Además un recorrido completo en TypeScript: dos personas compran, se revenden un NFT, una reclama, se carga un drop nuevo, y lo que no debe poder hacerse falla.
+
 ## Tecnologías
 
 - Contratos: Solidity 0.8.38 con OpenZeppelin Contracts 5.6.1. Compilador, objetivo de EVM (`cancun`) y optimizador fijos en `hardhat.config.ts`.
@@ -138,6 +169,7 @@ Volver a verificar antes de usarlos. Fecha de la verificación entre paréntesis
 - Conflux eSpace es compatible con EVM y funciona con Hardhat, Foundry, ethers y viem (19/11/2026). https://doc.confluxnetwork.org/docs/espace/Overview
 - Testnet: chain ID 71, RPC `https://evmtestnet.confluxrpc.com`, explorador https://evmtestnet.confluxscan.org. Mainnet: chain ID 1030, RPC `https://evm.confluxrpc.com` (19/11/2026). https://doc.confluxnetwork.org/docs/espace/network-endpoints
 - Finalidad: la etiqueta `finalized` corresponde a bloques finalizados por la cadena PoS y tarda unas 400 confirmaciones (19/11/2026). https://doc.confluxnetwork.org/docs/espace/build/transaction
+- Diferencias de eSpace con Ethereum que tocan a este proyecto (26/11/2026): el número de bloque no sirve para medir tiempo (los contratos usan la hora del bloque); guardar un dato nuevo cuesta 40.000 de gas, el doble que en Ethereum; de una transacción se devuelve como máximo un cuarto del gas límite, así que el sitio tiene que calcular el gas ajustado; las transacciones de eSpace entran solo en algunos bloques y comparten un cupo de gas, lo que limita cuántas prendas entran en un drop cargado en una sola transacción; acepta transacciones EIP-1559 y EIP-7702. https://doc.confluxnetwork.org/docs/espace/build/evm-compatibility
 - La actualización v3.0 de Conflux incluyó CIP-645, que alinea eSpace con el EVM (MCOPY, almacenamiento transitorio), y CIP-7702 (26/11/2026). https://github.com/Conflux-Chain/conflux-rust/releases/tag/v3.0.0
 - USDT0 en eSpace mainnet: `0xAf37E8B6c9ED7F6318979F56Fc287d76C30847FF`, 6 decimales, acepta pagos autorizados por firma (EIP-3009). La página no da direcciones de testnet (19/11/2026). https://doc.confluxnetwork.org/docs/espace/tutorials/x402/
 - USDT0, según la auditoría de OpenZeppelin del 29/01/2025: actualizable (no dice quién controla las actualizaciones); su dueño puede bloquear cuentas y quemar los fondos de una cuenta bloqueada; una cuenta bloqueada puede recibir, pero no puede enviar ni ejecutar transferencias por cuenta de otros; el rol del puente puede quemar cualquier saldo. La auditoría cubre la versión de Arbitrum y el contrato pensado para cadenas nuevas, y no menciona a Conflux: confirmar contra el contrato real (releída el 26/11/2026). https://www.openzeppelin.com/news/usdt0-audit
@@ -176,6 +208,6 @@ Si la máquina no puede descargar el compilador de Solidity, se puede indicar un
 
 ## Próximos pasos
 
-1. Contratos `Venta` y `Mercado` con sus tests.
-2. Revisión de seguridad independiente de los tres contratos.
+1. Revisión de seguridad independiente de `Venta` y `Mercado`, y de los tres contratos juntos.
+2. Respuestas del dueño a las decisiones "a confirmar" y a las protecciones que propuso la revisión de `Prenda`.
 3. Despliegue en la testnet de Conflux eSpace y verificación en ConfluxScan.

@@ -11,8 +11,8 @@ Una tienda con mercado de reventa donde cada prenda única de allka es un NFT en
 | Pieza | Qué hace |
 |---|---|
 | Contrato Prenda (NFT) | Es el contrato permanente. Un NFT por cada prenda física, con su talle. Guarda las reglas de guarda de cada drop y hace el reclamo: al reclamar, el NFT se quema. |
-| Contrato Venta | Los drops: precio en USDT0, fecha de apertura y entrada anticipada para holders de $FGM. Cobra y entrega el NFT en el mismo paso. |
-| Contrato Mercado | La reventa: el dueño publica un precio y otro usuario compra. Reparte el pago en el momento: 98% al vendedor, 2% a FGM. |
+| Contrato Venta | Los drops: cada prenda con su precio en USDT0, fecha de apertura y entrada anticipada para holders de $FGM. Cobra y entrega el NFT en el mismo paso. |
+| Contrato Mercado | La reventa: el dueño publica un precio y otro usuario compra. Reparte el pago en el momento: 98% al vendedor, 2% a FGM. Las ofertas vencen. Nadie lo administra. |
 | Sitio web | Next.js en Vercel, en inglés y español, pensado primero para celular. Pantallas: drops, prenda, mercado, mi colección, reclamar. |
 | Servidor y base de datos | Guarda el catálogo (fotos, talles) y los datos de envío y de factura, que se piden recién al reclamar. |
 | Panel de administración | Cargar drops sin tocar código, ver los reclamos por despachar y marcar los envíos. |
@@ -38,9 +38,9 @@ Toda prenda está terminada, etiquetada con el número de su NFT y guardada ante
 ## Los cuatro recorridos
 
 1. Comprar: conectar la billetera, autorizar el monto exacto en USDT0 y comprar. El comprador indica el precio que espera pagar; si cambió, la compra no se hace.
-2. Revender: la primera vez el dueño le da permiso al Mercado sobre sus NFT; después publica un precio. Cuando otro usuario paga, el NFT cambia de dueño.
+2. Revender: la primera vez el dueño le da permiso al Mercado sobre sus NFT; después publica un precio y hasta cuándo vale la oferta. Cuando otro usuario paga, el NFT cambia de dueño. El comprador indica el precio que espera pagar; si el vendedor lo cambió, la compra no se hace.
 3. Reclamar: el sitio revisa antes que se pueda enviar a ese país. El dueño paga la guarda si corresponde y el NFT se quema. El pedido se crea solo a partir de esa quema en la cadena, y los datos de envío valen solo si los firma la misma billetera que quemó. Se pueden corregir hasta el despacho.
-4. Cargar un drop: completar el formulario del panel, revisar los valores que el panel muestra de vuelta y firmar. El drop abre como mínimo 24 horas después y se puede cancelar antes de abrir.
+4. Cargar un drop: completar el formulario del panel, revisar los valores que el panel muestra de vuelta y firmar. El drop abre como mínimo 24 horas después y se puede cancelar antes de abrir. Una vez cargado no se puede cambiar.
 
 ## Transferencias
 

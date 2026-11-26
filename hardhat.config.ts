@@ -26,6 +26,21 @@ export default defineConfig({
       },
     },
   },
+  test: {
+    solidity: {
+      profiles: {
+        // What runs every time, locally and on every change pushed to GitHub.
+        default: {
+          invariant: { runs: 64, depth: 250 },
+        },
+        // The long run, before a release: npx hardhat test solidity --test-profile deep
+        deep: {
+          fuzz: { runs: 2_000 },
+          invariant: { runs: 512, depth: 500 },
+        },
+      },
+    },
+  },
   networks: {
     confluxESpaceTestnet: {
       type: "http",
