@@ -25,8 +25,9 @@ In the code the three contracts keep their Spanish names: `Prenda`, `Venta` and 
 
 - Primary sale: USDT0 goes straight from the buyer's wallet to the FGM treasury. There is no escrow and no contract ever holds funds.
 - Resale: USDT0 goes straight from the buyer to the seller (98%) and to the treasury (2%). The fee is fixed in this Market: nobody can raise it.
-- Storage: the free period counts from the original sale. After that, one instalment is added for every 30 full days, up to a maximum set in the drop. Whoever claims pays it. Example: with 6 free months, a claim in month 8 pays 2 instalments. The right to the garment never expires.
-- FGM can waive storage fees, never raise them.
+- Storage: the free period counts from the original sale. After that, one instalment is added for every 30 full days, up to a maximum set in the drop. Whoever claims pays it. Example: with 6 free months, a claim made when 8 months are up pays 2 instalments; at 7 and a half months it pays 1. The right to the garment never expires.
+- FGM can waive storage fees by giving a garment more free time. It can never raise them or shorten the free time.
+- Storage is always charged in the same currency (USDT0). It cannot be switched to another one.
 
 ## Early access for $FGM holders
 
@@ -47,17 +48,21 @@ Every garment is finished, tagged with its NFT number and stored before its drop
 
 An NFT only changes owner through an authorised Market, and always with its owner's permission: no Market, current or future, can move an NFT its owner has not approved. There is a one-way switch to free transfers later.
 
+While transfers are closed, an owner can only give permission to an authorised Market. That way no permissions to third parties pile up waiting for the day transfers are freed.
+
 Limits worth knowing: the lock does not stop someone from selling their whole wallet, and a user whose wallet is compromised cannot move the NFT to another one (they can only sell it or claim the garment).
 
 ## What FGM can do after selling
 
 - Pause purchases and resale in an emergency. Claims are never paused.
+- Add a new Sale module or retire one.
 - Authorise a new Market or permanently switch off one that fails.
 - Free transfers (cannot be undone).
 - Change the treasury address.
 - Waive storage fees.
+- Change the web address that serves the NFTs' photos and data. The content cannot change unnoticed: it is sealed with its content hash.
 
-What it cannot do: change the price of a drop already created, raise its storage fee, move someone else's NFT, or sell a used NFT number again.
+What it cannot do: change the price of a drop already created, raise its storage fee, change the currency it is charged in, move someone else's NFT, claim someone else's garment, or sell a used NFT number again.
 
 ## Security
 

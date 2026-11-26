@@ -23,8 +23,9 @@ Venta y Mercado son módulos que se pueden sumar o reemplazar. Prenda no se reem
 
 - Venta primaria: el USDT0 va directo de la billetera del comprador a la tesorería de FGM. No hay escrow y ningún contrato retiene fondos.
 - Reventa: el USDT0 va directo del comprador al vendedor (98%) y a la tesorería (2%). La comisión es fija en este Mercado: nadie puede subirla.
-- Guarda: el período gratis se cuenta desde la venta original. Después se suma una cuota por cada 30 días cumplidos, hasta un máximo fijado en el drop. La paga quien reclama. Ejemplo: con 6 meses gratis, quien reclama en el mes 8 paga 2 cuotas. El derecho a la prenda no vence.
-- FGM puede perdonar guarda, nunca subirla.
+- Guarda: el período gratis se cuenta desde la venta original. Después se suma una cuota por cada 30 días cumplidos, hasta un máximo fijado en el drop. La paga quien reclama. Ejemplo: con 6 meses gratis, quien reclama cuando se cumplen 8 meses paga 2 cuotas; a los 7 meses y medio paga 1. El derecho a la prenda no vence.
+- FGM puede perdonar guarda dándole más tiempo gratis a una prenda. Nunca puede subirla ni acortar el tiempo gratis.
+- La guarda se cobra siempre en la misma moneda (USDT0). No se puede cambiar por otra.
 
 ## Entrada anticipada para holders de $FGM
 
@@ -45,17 +46,21 @@ Toda prenda está terminada, etiquetada con el número de su NFT y guardada ante
 
 El NFT solo cambia de dueño a través de un Mercado autorizado, y siempre con permiso de su dueño: ningún Mercado, ni actual ni futuro, puede mover un NFT que su dueño no le haya autorizado. Hay un interruptor de una sola vía para liberar las transferencias más adelante.
 
+Mientras las transferencias estén cerradas, el dueño solo puede darle permiso a un Mercado autorizado. Así no se juntan permisos a terceros que empezarían a valer el día que se liberen las transferencias.
+
 Límites que conviene saber: el candado no impide que alguien venda su billetera entera, y quien tenga la billetera comprometida no puede pasar el NFT a otra (solo venderlo o reclamar la prenda).
 
 ## Qué puede hacer FGM después de vender
 
 - Pausar compras y reventa en una emergencia. Los reclamos no se pausan.
+- Sumar un módulo de Venta nuevo o retirar uno.
 - Autorizar un Mercado nuevo o apagar para siempre uno que falle.
 - Liberar las transferencias (no se puede deshacer).
 - Cambiar la dirección de la tesorería.
 - Perdonar guarda.
+- Cambiar la dirección web desde donde se sirven las fotos y los datos de los NFT. El contenido no cambia sin que se note: queda sellado con su huella.
 
-Lo que no puede: cambiar el precio de un drop ya creado, subirle la guarda, mover un NFT ajeno, ni volver a vender un número de NFT ya usado.
+Lo que no puede: cambiar el precio de un drop ya creado, subirle la guarda, cambiar la moneda en que se cobra, mover un NFT ajeno, reclamar la prenda de otro, ni volver a vender un número de NFT ya usado.
 
 ## Seguridad
 

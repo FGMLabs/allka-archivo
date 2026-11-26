@@ -8,8 +8,8 @@ Bitácora del proyecto: decisiones, avance y pendientes. Se lee al empezar cada 
 
 - Fase 0 terminada. La arquitectura se aprobó el 26/11/2026, ya corregida tras una revisión de seguridad independiente.
 - Fase 1 en curso (contratos).
-  - Hecho: proyecto Hardhat 3, pruebas automáticas en cada cambio (CI) y el token de prueba `TestUSDT0` con sus tests.
-  - Falta: contratos `Prenda`, `Venta` y `Mercado` con sus tests, revisión independiente y despliegue en la testnet de Conflux eSpace.
+  - Hecho: proyecto Hardhat 3, pruebas automáticas en cada cambio (CI), el token de prueba `TestUSDT0` y el contrato `Prenda` con sus tests.
+  - Falta: contratos `Venta` y `Mercado` con sus tests, revisión independiente de los tres juntos y despliegue en la testnet de Conflux eSpace.
 
 ## Decisiones tomadas
 
@@ -59,6 +59,28 @@ Para la Fase 4:
 - Datos personales: mínimos, cifrados, panel con doble factor, borrado después de la entrega, nada en la cadena.
 
 Límites conocidos, sin agregar maquinaria: el candado de transferencias no impide vender la billetera entera ni usar una billetera-contrato como envoltorio; quien tenga la billetera comprometida no puede mover el NFT a otra; con un derecho que no vence, la prenda de quien perdió su billetera queda guardada para siempre.
+
+## Cómo quedó `Prenda`
+
+Decisiones tomadas al escribirlo. Las que dicen "a confirmar" son propuestas del equipo técnico que el dueño todavía no aprobó.
+
+- Reclama solo el dueño del NFT. Ni un Mercado con permiso, ni la administración, ni el módulo de venta pueden reclamar por él.
+- La guarda de cada NFT (tiempo gratis, cuota y tope) se fija al venderlo y queda guardada en `Prenda`. El tiempo gratis corre desde ese momento.
+- Perdonar guarda es darle más tiempo gratis a una prenda: la fecha solo puede avanzar. También sirve de salida si USDT0 dejara de funcionar, porque con la guarda en cero el reclamo no toca el token.
+- La moneda de la guarda queda fija al desplegar. La tesorería vive en `Prenda` y los módulos `Venta` y `Mercado` la leen de ahí: un solo cambio alcanza a todo.
+- Cada NFT cuenta cuántas veces cambió de manos. El Mercado lo va a usar para descartar publicaciones hechas por un dueño anterior.
+- El NFT se crea sin pasarle el control al comprador en medio de la compra (`_mint` y no `_safeMint`).
+- Los módulos de venta y los Mercados tienen que ser contratos, no billeteras comunes. Es una traba contra autorizar por error una dirección equivocada.
+- A confirmar: mientras las transferencias estén cerradas, solo se le puede dar permiso a un Mercado autorizado.
+- A confirmar: la dirección web de los datos de los NFT se puede cambiar; lo que no se puede cambiar es la huella de los datos de cada NFT.
+- A confirmar: la administración no se puede abandonar, para que el contrato nunca quede sin nadie que pueda pausar o cambiar la tesorería.
+
+Cómo se probó: tests de cada función, incluidos los caminos que deben fallar, con valores al azar para la guarda y el reclamo. Además se rompió el contrato a propósito, una regla por vez, para comprobar que algún test lo nota.
+
+Pendientes que salieron al escribirlo:
+
+- Fase 4: antes de despachar, el servidor tiene que comprobar que el NFT quemado nació de una venta oficial, además de que la quema esté finalizada.
+- Antes de mainnet: la dirección de administración debería ser una billetera de varias firmas, y hay que vigilar los avisos de cambios de administración (tesorería, módulos de venta y Mercados nuevos).
 
 ## Tecnologías
 
@@ -111,7 +133,6 @@ Si la máquina no puede descargar el compilador de Solidity, se puede indicar un
 
 ## Próximos pasos
 
-1. Contrato `Prenda` con sus tests.
-2. Contratos `Venta` y `Mercado` con sus tests.
-3. Revisión de seguridad independiente de los tres contratos.
-4. Despliegue en la testnet de Conflux eSpace y verificación en ConfluxScan.
+1. Contratos `Venta` y `Mercado` con sus tests.
+2. Revisión de seguridad independiente de los tres contratos.
+3. Despliegue en la testnet de Conflux eSpace y verificación en ConfluxScan.
