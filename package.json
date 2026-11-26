@@ -1,0 +1,26 @@
+{
+  "name": "allka-archivo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Physical fashion pieces sold as NFTs on Conflux eSpace, with a built-in resale market. By FGM Labs.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "hardhat build",
+    "test": "hardhat test",
+    "typecheck": "hardhat build && tsc --noEmit"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-ignition": "^3.1.10",
+    "@nomicfoundation/hardhat-toolbox-viem": "^5.0.7",
+    "@openzeppelin/contracts": "^5.6.1",
+    "@types/node": "^22.20.7",
+    "forge-std": "github:foundry-rs/forge-std#v1.17.0",
+    "hardhat": "^3.23.0",
+    "typescript": "~6.0.3",
+    "viem": "^2.58.7"
+  }
+}
