@@ -46,7 +46,11 @@ Toda prenda está terminada, etiquetada con el número de su NFT y guardada ante
 
 El NFT solo cambia de dueño a través de un Mercado autorizado, y siempre con permiso de su dueño: ningún Mercado, ni actual ni futuro, puede mover un NFT que su dueño no le haya autorizado. Hay un interruptor de una sola vía para liberar las transferencias más adelante.
 
-Mientras las transferencias estén cerradas, el dueño solo puede darle permiso a un Mercado autorizado. Así no se juntan permisos a terceros que empezarían a valer el día que se liberen las transferencias.
+Los permisos son más estrictos que en un NFT común, para que estas reglas no dependan de cómo esté hecho cada Mercado:
+
+- Solo el dueño da permisos. Un Mercado no puede pasarle a otro el permiso que recibió.
+- Mientras las transferencias estén cerradas, solo se le puede dar permiso a un Mercado autorizado. Así no se juntan permisos a terceros que empezarían a valer el día que se liberen.
+- Un Mercado apagado pierde todos los permisos que tenía.
 
 Límites que conviene saber: el candado no impide que alguien venda su billetera entera, y quien tenga la billetera comprometida no puede pasar el NFT a otra (solo venderlo o reclamar la prenda).
 
@@ -67,7 +71,8 @@ Lo que no puede: cambiar el precio de un drop ya creado, subirle la guarda, camb
 - Tres direcciones de FGM: operador (carga drops; no puede cambiar a dónde va la plata), tesorería (recibe los USDT0) y administración (los interruptores de la lista anterior; guardada y sin uso diario).
 - El contrato rechaza precios por debajo de un mínimo y guardas por encima de un máximo, para que un error de carga no regale un drop.
 - Los contratos solo cobran de quien hace la operación y nunca tienen saldo.
-- USDT0 lo controla su emisor, que puede bloquear direcciones y actualizar el token. Por eso la tesorería se puede cambiar y un reclamo sin guarda no toca el token. Antes de mainnet se prueba todo contra el USDT0 real en una copia de la red.
+- USDT0 lo controla su emisor, que puede bloquear direcciones y actualizar el token. Por eso la tesorería se puede cambiar y un reclamo sin guarda no toca el token. Límite conocido: si el emisor bloqueara la dirección del contrato de las prendas, los reclamos con guarda quedan frenados hasta que FGM la perdone; los reclamos sin guarda siguen funcionando. Antes de mainnet se prueba todo contra el USDT0 real en una copia de la red.
+- Solo se pueden sumar módulos de Venta y Mercados hechos para este contrato. La administración no puede registrar otra dirección por error, ni usar el apagado de Mercados para bloquear billeteras o contratos ajenos.
 - El servidor despacha solo cuando la quema quedó firme en la cadena (finalizada).
 - Datos personales: los mínimos, cifrados, panel con doble factor, se borran después de la entrega y nada va a la cadena.
 - Las fotos y los datos de cada NFT quedan sellados con una huella al crear el drop.

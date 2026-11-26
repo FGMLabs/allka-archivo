@@ -48,7 +48,11 @@ Every garment is finished, tagged with its NFT number and stored before its drop
 
 An NFT only changes owner through an authorised Market, and always with its owner's permission: no Market, current or future, can move an NFT its owner has not approved. There is a one-way switch to free transfers later.
 
-While transfers are closed, an owner can only give permission to an authorised Market. That way no permissions to third parties pile up waiting for the day transfers are freed.
+Permissions are stricter than in an ordinary NFT, so that these rules do not depend on how each Market is written:
+
+- Only the owner gives permissions. A Market cannot pass the permission it received on to another one.
+- While transfers are closed, permission can only be given to an authorised Market. That way no permissions to third parties pile up waiting for the day transfers are freed.
+- A Market that is switched off loses every permission it had.
 
 Limits worth knowing: the lock does not stop someone from selling their whole wallet, and a user whose wallet is compromised cannot move the NFT to another one (they can only sell it or claim the garment).
 
@@ -69,7 +73,8 @@ What it cannot do: change the price of a drop already created, raise its storage
 - Three FGM addresses: operator (creates drops; cannot change where money goes), treasury (receives USDT0) and admin (the switches listed above; kept offline and not used day to day).
 - The contract rejects prices below a minimum and storage fees above a maximum, so a data-entry mistake cannot give a drop away.
 - Contracts only charge the caller and never hold a balance.
-- USDT0 is controlled by its issuer, which can block addresses and upgrade the token. That is why the treasury can be changed and a claim with no storage fee does not touch the token. Before mainnet everything is tested against the real USDT0 on a fork of the network.
+- USDT0 is controlled by its issuer, which can block addresses and upgrade the token. That is why the treasury can be changed and a claim with no storage fee does not touch the token. Known limit: if the issuer blocked the address of the Garment contract, claims that owe a storage fee would stop until FGM waives it; claims with no fee keep working. Before mainnet everything is tested against the real USDT0 on a fork of the network.
+- Only Sale modules and Markets built for this contract can be added. The admin cannot register another address by mistake, or use the Market switch-off to block other people's wallets or contracts.
 - The server ships only once the burn is final on chain (finalized).
 - Personal data: the minimum, encrypted, admin panel behind two-factor login, deleted after delivery and never written on chain.
 - Each NFT's photos and data are sealed with a content hash when the drop is created.

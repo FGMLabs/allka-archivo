@@ -8,7 +8,18 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Prenda} from "./Prenda.sol";
+import {
+    AcceptingReceiverMock,
+    DoubleDipHolderMock,
+    IMover,
+    InertHolderMock,
+    RejectingReceiverMock,
+    WalletMock
+} from "./mocks/HolderMocks.sol";
+import {FailingAnswerMock, LongAnswerMock} from "./mocks/ModuleAnswerMocks.sol";
 import {OpenMarketMock} from "./mocks/OpenMarketMock.sol";
+import {OpenMinterMock} from "./mocks/OpenMinterMock.sol";
+import {BlocklistTokenMock, CallbackTokenMock} from "./mocks/PaymentTokenMocks.sol";
 import {RevertingToken} from "./mocks/RevertingToken.sol";
 import {TestUSDT0} from "./mocks/TestUSDT0.sol";
 
@@ -29,23 +40,29 @@ contract PrendaTest is Test {
 
     TestUSDT0 internal usdt;
     Prenda internal prenda;
+    OpenMinterMock internal minter;
     OpenMarketMock internal market;
 
-    /// @dev Moment of the sale in every test: tokens are minted without moving the clock first.
+    /// @dev Moment of the sale in every test: NFTs are created without moving the clock first.
     uint256 internal soldAt;
 
-    /// @dev This test contract plays the role of the sale module: the administration makes it a minter.
     function setUp() public {
         usdt = new TestUSDT0();
-        prenda = new Prenda("Allka Archivo", "ALLKA", usdt, treasury, admin, BASE_URI);
-        market = new OpenMarketMock(prenda);
-
-        vm.startPrank(admin);
-        prenda.setMinter(address(this), true);
-        prenda.authorizeMarket(address(market));
-        vm.stopPrank();
-
+        (prenda, minter, market) = _deployWith(usdt);
         soldAt = block.timestamp;
+    }
+
+    /// @dev A full set: the NFT contract, a sale module allowed to mint and an authorized market.
+    function _deployWith(
+        IERC20 paymentToken
+    ) internal returns (Prenda newPrenda, OpenMinterMock newMinter, OpenMarketMock newMarket) {
+        newPrenda = new Prenda("Allka Archivo", "ALLKA", paymentToken, treasury, admin, BASE_URI);
+        newMinter = new OpenMinterMock(newPrenda);
+        newMarket = new OpenMarketMock(newPrenda);
+        vm.startPrank(admin);
+        newPrenda.setMinter(address(newMinter), true);
+        newPrenda.authorizeMarket(address(newMarket));
+        vm.stopPrank();
     }
 
     function _terms() internal pure returns (Prenda.StorageTerms memory) {
@@ -53,7 +70,7 @@ contract PrendaTest is Test {
     }
 
     function _sell(address to, uint256 tokenId) internal {
-        prenda.mint(to, tokenId, _terms(), CONTENT_HASH);
+        minter.mint(to, tokenId, _terms(), CONTENT_HASH);
     }
 
     /// @dev Gives `account` exactly `amount` test USDT0 and approves the NFT contract for exactly that amount.
@@ -69,12 +86,38 @@ contract PrendaTest is Test {
         prenda.setApprovalForAll(address(market), true);
     }
 
+    function _authorizeAnotherMarket() internal returns (OpenMarketMock other) {
+        other = new OpenMarketMock(prenda);
+        vm.prank(admin);
+        prenda.authorizeMarket(address(other));
+    }
+
     function _unauthorized(address account) internal pure returns (bytes memory) {
         return abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, account);
     }
 
     function _nonexistent(uint256 tokenId) internal pure returns (bytes memory) {
         return abi.encodeWithSelector(IERC721Errors.ERC721NonexistentToken.selector, tokenId);
+    }
+
+    function _notApproved(address operator, uint256 tokenId) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(IERC721Errors.ERC721InsufficientApproval.selector, operator, tokenId);
+    }
+
+    function _transferNotAllowed(address executor) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(Prenda.TransferNotAllowed.selector, executor);
+    }
+
+    function _approvalNotAllowed(address operator) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(Prenda.ApprovalNotAllowed.selector, operator);
+    }
+
+    function _invalidApprover(address approver) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(IERC721Errors.ERC721InvalidApprover.selector, approver);
+    }
+
+    function _invalidReceiver(address receiver) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(IERC721Errors.ERC721InvalidReceiver.selector, receiver);
     }
 
     // ------------------------------------------------------------------------------------------------------------
@@ -120,6 +163,16 @@ contract PrendaTest is Test {
         new Prenda("Allka Archivo", "ALLKA", usdt, treasury, address(0), BASE_URI);
     }
 
+    function test_SupportsTheErc721InterfacesAndNoOthers() public view {
+        assertTrue(prenda.supportsInterface(0x01ffc9a7)); // ERC-165
+        assertTrue(prenda.supportsInterface(0x80ac58cd)); // ERC-721
+        assertTrue(prenda.supportsInterface(0x5b5e139f)); // ERC-721 Metadata
+        assertFalse(prenda.supportsInterface(0xffffffff));
+        assertFalse(prenda.supportsInterface(0x780e9d63)); // ERC-721 Enumerable: not implemented
+        assertFalse(prenda.supportsInterface(0x2a55205a)); // ERC-2981 royalties: not implemented
+        assertFalse(prenda.supportsInterface(0x49064906)); // ERC-4906 metadata update: not implemented
+    }
+
     // ------------------------------------------------------------------------------------------------------------
     // Creating an NFT (first sale)
     // ------------------------------------------------------------------------------------------------------------
@@ -128,7 +181,15 @@ contract PrendaTest is Test {
         vm.expectEmit(address(prenda));
         emit IERC721.Transfer(address(0), alice, TOKEN);
         vm.expectEmit(address(prenda));
-        emit Prenda.Minted(TOKEN, alice, uint48(soldAt + FREE_PERIOD), FEE, MAX_FEE, CONTENT_HASH);
+        emit Prenda.Minted(
+            TOKEN,
+            alice,
+            address(minter),
+            uint48(soldAt + FREE_PERIOD),
+            FEE,
+            MAX_FEE,
+            CONTENT_HASH
+        );
         _sell(alice, TOKEN);
 
         assertEq(prenda.ownerOf(TOKEN), alice);
@@ -154,14 +215,14 @@ contract PrendaTest is Test {
     }
 
     function test_MintWithoutStorageFeeIsAllowed() public {
-        prenda.mint(alice, TOKEN, Prenda.StorageTerms({freePeriod: 0, feePerPeriod: 0, maxFee: 0}), CONTENT_HASH);
+        minter.mint(alice, TOKEN, Prenda.StorageTerms({freePeriod: 0, feePerPeriod: 0, maxFee: 0}), CONTENT_HASH);
 
         vm.warp(soldAt + 3650 days);
         assertEq(prenda.storageFeeOf(TOKEN), 0);
     }
 
     function test_MintAcceptsTheLongestFreePeriod() public {
-        prenda.mint(
+        minter.mint(
             alice,
             TOKEN,
             Prenda.StorageTerms({freePeriod: type(uint32).max, feePerPeriod: FEE, maxFee: MAX_FEE}),
@@ -173,7 +234,7 @@ contract PrendaTest is Test {
     }
 
     function test_MintAcceptsACeilingOfExactlyOneInstalment() public {
-        prenda.mint(
+        minter.mint(
             alice,
             TOKEN,
             Prenda.StorageTerms({freePeriod: FREE_PERIOD, feePerPeriod: FEE, maxFee: FEE}),
@@ -184,6 +245,18 @@ contract PrendaTest is Test {
         assertEq(prenda.storageFeeOf(TOKEN), FEE);
         vm.warp(soldAt + FREE_PERIOD + 300 days);
         assertEq(prenda.storageFeeOf(TOKEN), FEE);
+    }
+
+    /// @dev The buyer gets no call in the middle of the sale, so a contract that cannot answer can still buy.
+    function test_MintNeverCallsTheBuyer() public {
+        InertHolderMock inert = new InertHolderMock();
+        RejectingReceiverMock rejecting = new RejectingReceiverMock();
+
+        _sell(address(inert), TOKEN);
+        _sell(address(rejecting), TOKEN + 1);
+
+        assertEq(prenda.ownerOf(TOKEN), address(inert));
+        assertEq(prenda.ownerOf(TOKEN + 1), address(rejecting));
     }
 
     function test_RevertWhen_MintCallerIsNotAMinter() public {
@@ -198,11 +271,17 @@ contract PrendaTest is Test {
         prenda.mint(admin, TOKEN, _terms(), CONTENT_HASH);
     }
 
+    function test_RevertWhen_MarketMints() public {
+        vm.prank(address(market));
+        vm.expectRevert(abi.encodeWithSelector(Prenda.NotMinter.selector, address(market)));
+        prenda.mint(alice, TOKEN, _terms(), CONTENT_HASH);
+    }
+
     function test_RevertWhen_MinterWasRemoved() public {
         vm.prank(admin);
-        prenda.setMinter(address(this), false);
+        prenda.setMinter(address(minter), false);
 
-        vm.expectRevert(abi.encodeWithSelector(Prenda.NotMinter.selector, address(this)));
+        vm.expectRevert(abi.encodeWithSelector(Prenda.NotMinter.selector, address(minter)));
         _sell(alice, TOKEN);
     }
 
@@ -230,14 +309,24 @@ contract PrendaTest is Test {
         _sell(bob, TOKEN);
     }
 
+    function test_RevertWhen_AnotherMinterReusesATokenId() public {
+        OpenMinterMock other = new OpenMinterMock(prenda);
+        vm.prank(admin);
+        prenda.setMinter(address(other), true);
+        _sell(alice, TOKEN);
+
+        vm.expectRevert(abi.encodeWithSelector(Prenda.TokenIdAlreadyUsed.selector, TOKEN));
+        other.mint(bob, TOKEN, _terms(), CONTENT_HASH);
+    }
+
     function test_RevertWhen_ContentHashIsEmpty() public {
         vm.expectRevert(Prenda.EmptyContentHash.selector);
-        prenda.mint(alice, TOKEN, _terms(), bytes32(0));
+        minter.mint(alice, TOKEN, _terms(), bytes32(0));
     }
 
     function test_RevertWhen_StorageHasNoFeeButHasACeiling() public {
         vm.expectRevert(abi.encodeWithSelector(Prenda.InvalidStorageTerms.selector, uint80(0), MAX_FEE));
-        prenda.mint(
+        minter.mint(
             alice,
             TOKEN,
             Prenda.StorageTerms({freePeriod: FREE_PERIOD, feePerPeriod: 0, maxFee: MAX_FEE}),
@@ -247,7 +336,7 @@ contract PrendaTest is Test {
 
     function test_RevertWhen_StorageCeilingIsBelowOneInstalment() public {
         vm.expectRevert(abi.encodeWithSelector(Prenda.InvalidStorageTerms.selector, FEE, FEE - 1));
-        prenda.mint(
+        minter.mint(
             alice,
             TOKEN,
             Prenda.StorageTerms({freePeriod: FREE_PERIOD, feePerPeriod: FEE, maxFee: FEE - 1}),
@@ -257,7 +346,7 @@ contract PrendaTest is Test {
 
     function test_RevertWhen_StorageHasAFeeButNoCeiling() public {
         vm.expectRevert(abi.encodeWithSelector(Prenda.InvalidStorageTerms.selector, FEE, uint80(0)));
-        prenda.mint(
+        minter.mint(
             alice,
             TOKEN,
             Prenda.StorageTerms({freePeriod: FREE_PERIOD, feePerPeriod: FEE, maxFee: 0}),
@@ -266,8 +355,16 @@ contract PrendaTest is Test {
     }
 
     function test_RevertWhen_MintToTheZeroAddress() public {
-        vm.expectRevert(abi.encodeWithSelector(IERC721Errors.ERC721InvalidReceiver.selector, address(0)));
+        vm.expectRevert(_invalidReceiver(address(0)));
         _sell(address(0), TOKEN);
+    }
+
+    /// @dev An NFT held by the NFT contract could never be claimed or moved.
+    function test_RevertWhen_MintToTheNftContractItself() public {
+        vm.expectRevert(_invalidReceiver(address(prenda)));
+        _sell(address(prenda), TOKEN);
+
+        assertFalse(prenda.isTokenIdUsed(TOKEN));
     }
 
     // ------------------------------------------------------------------------------------------------------------
@@ -321,7 +418,7 @@ contract PrendaTest is Test {
 
     function test_StorageFeeStopsAtACeilingThatIsNotAMultipleOfTheInstalment() public {
         uint80 ceiling = 12 * 10 ** 6;
-        prenda.mint(
+        minter.mint(
             alice,
             TOKEN,
             Prenda.StorageTerms({freePeriod: FREE_PERIOD, feePerPeriod: FEE, maxFee: ceiling}),
@@ -366,7 +463,7 @@ contract PrendaTest is Test {
     ) public {
         feePerPeriod = uint80(bound(feePerPeriod, 1, type(uint80).max));
         maxFee = uint80(bound(maxFee, feePerPeriod, type(uint80).max));
-        prenda.mint(
+        minter.mint(
             alice,
             TOKEN,
             Prenda.StorageTerms({freePeriod: freePeriod, feePerPeriod: feePerPeriod, maxFee: maxFee}),
@@ -398,6 +495,59 @@ contract PrendaTest is Test {
         uint256 instalments = 1 + (moment - freeUntil - 30 days) / 30 days;
         if (instalments > maxFee / feePerPeriod) return maxFee;
         return instalments * feePerPeriod;
+    }
+
+    /// @dev One storage slot holds five fields. With every field at its limit, writing one leaves the others alone.
+    function test_RecordFieldsAtTheirLimitsDoNotDisturbEachOther() public {
+        minter.mint(
+            alice,
+            TOKEN,
+            Prenda.StorageTerms({
+                freePeriod: type(uint32).max,
+                feePerPeriod: type(uint80).max,
+                maxFee: type(uint80).max
+            }),
+            CONTENT_HASH
+        );
+        _approveMarket(alice);
+        market.move(alice, bob, TOKEN);
+        vm.prank(bob);
+        prenda.approve(address(market), TOKEN);
+        market.move(bob, bob, TOKEN);
+
+        (uint48 freeUntil, uint80 feePerPeriod, uint80 maxFee) = prenda.storageTermsOf(TOKEN);
+        assertEq(freeUntil, soldAt + type(uint32).max);
+        assertEq(feePerPeriod, type(uint80).max);
+        assertEq(maxFee, type(uint80).max);
+        assertEq(prenda.transferCountOf(TOKEN), 2);
+        assertTrue(prenda.isTokenIdUsed(TOKEN));
+
+        vm.prank(admin);
+        prenda.extendFreeStorage(TOKEN, type(uint48).max - 60 days);
+        (freeUntil, feePerPeriod, maxFee) = prenda.storageTermsOf(TOKEN);
+        assertEq(freeUntil, type(uint48).max - 60 days);
+        assertEq(feePerPeriod, type(uint80).max);
+        assertEq(maxFee, type(uint80).max);
+        assertEq(prenda.transferCountOf(TOKEN), 2);
+        assertTrue(prenda.isTokenIdUsed(TOKEN));
+
+        // The largest instalment, at the far end of the dates the contract can store.
+        vm.warp(type(uint48).max - 30 days);
+        assertEq(prenda.storageFeeOf(TOKEN), type(uint80).max);
+        vm.warp(type(uint48).max);
+        assertEq(prenda.storageFeeOf(TOKEN), type(uint80).max);
+
+        // After the burn the record is still there and the number stays used.
+        vm.prank(admin);
+        prenda.extendFreeStorage(TOKEN, type(uint48).max);
+        vm.prank(bob);
+        prenda.claim(TOKEN, 0);
+        (freeUntil, feePerPeriod, maxFee) = prenda.storageTermsOf(TOKEN);
+        assertEq(freeUntil, type(uint48).max);
+        assertEq(feePerPeriod, type(uint80).max);
+        assertEq(maxFee, type(uint80).max);
+        assertEq(prenda.transferCountOf(TOKEN), 2);
+        assertTrue(prenda.isTokenIdUsed(TOKEN));
     }
 
     // ------------------------------------------------------------------------------------------------------------
@@ -432,8 +582,8 @@ contract PrendaTest is Test {
     }
 
     function test_FreeClaimNeverCallsThePaymentToken() public {
-        Prenda frozen = _prendaWithBrokenToken();
-        frozen.mint(alice, TOKEN, _terms(), CONTENT_HASH);
+        (Prenda frozen, OpenMinterMock frozenMinter, ) = _deployWith(IERC20(address(new RevertingToken())));
+        frozenMinter.mint(alice, TOKEN, _terms(), CONTENT_HASH);
 
         vm.prank(alice);
         frozen.claim(TOKEN, 0);
@@ -442,8 +592,8 @@ contract PrendaTest is Test {
     }
 
     function test_RevertWhen_PaidClaimAndThePaymentTokenFails() public {
-        Prenda frozen = _prendaWithBrokenToken();
-        frozen.mint(alice, TOKEN, _terms(), CONTENT_HASH);
+        (Prenda frozen, OpenMinterMock frozenMinter, ) = _deployWith(IERC20(address(new RevertingToken())));
+        frozenMinter.mint(alice, TOKEN, _terms(), CONTENT_HASH);
         vm.warp(soldAt + FREE_PERIOD + 30 days);
 
         vm.prank(alice);
@@ -455,8 +605,8 @@ contract PrendaTest is Test {
     }
 
     function test_FreeStorageExtensionUnblocksAClaimWhenThePaymentTokenFails() public {
-        Prenda frozen = _prendaWithBrokenToken();
-        frozen.mint(alice, TOKEN, _terms(), CONTENT_HASH);
+        (Prenda frozen, OpenMinterMock frozenMinter, ) = _deployWith(IERC20(address(new RevertingToken())));
+        frozenMinter.mint(alice, TOKEN, _terms(), CONTENT_HASH);
         vm.warp(soldAt + FREE_PERIOD + 30 days);
 
         vm.prank(admin);
@@ -465,13 +615,6 @@ contract PrendaTest is Test {
         vm.prank(alice);
         frozen.claim(TOKEN, 0);
         assertEq(frozen.balanceOf(alice), 0);
-    }
-
-    function _prendaWithBrokenToken() internal returns (Prenda frozen) {
-        IERC20 broken = IERC20(address(new RevertingToken()));
-        frozen = new Prenda("Allka Archivo", "ALLKA", broken, treasury, admin, BASE_URI);
-        vm.prank(admin);
-        frozen.setMinter(address(this), true);
     }
 
     function test_PaidClaimSendsTheFeeFromTheClaimerToTheTreasury() public {
@@ -505,6 +648,26 @@ contract PrendaTest is Test {
         assertEq(usdt.balanceOf(address(prenda)), 0);
     }
 
+    /// @dev The order server reads the fee from this event: it must be what was paid, not what was accepted.
+    function test_ClaimedEventReportsTheFeePaidNotTheFeeAccepted() public {
+        _sell(alice, TOKEN);
+        _sell(alice, TOKEN + 1);
+        vm.warp(soldAt + FREE_PERIOD + 30 days);
+        vm.prank(admin);
+        prenda.extendFreeStorage(TOKEN + 1, type(uint48).max);
+        _fundAndApprove(alice, 100 * 10 ** 6);
+
+        vm.startPrank(alice);
+        vm.expectEmit(address(prenda));
+        emit Prenda.Claimed(TOKEN, alice, FEE);
+        prenda.claim(TOKEN, 100 * 10 ** 6);
+
+        vm.expectEmit(address(prenda));
+        emit Prenda.Claimed(TOKEN + 1, alice, 0);
+        prenda.claim(TOKEN + 1, type(uint256).max);
+        vm.stopPrank();
+    }
+
     function test_PaidClaimGoesToTheTreasuryInForceAtThatMoment() public {
         address newTreasury = makeAddr("new treasury");
         _sell(alice, TOKEN);
@@ -518,6 +681,32 @@ contract PrendaTest is Test {
 
         assertEq(usdt.balanceOf(newTreasury), FEE);
         assertEq(usdt.balanceOf(treasury), 0);
+    }
+
+    /**
+     * @dev The NFT is burned before the fee is collected. With the opposite order, a holder that gets a call from
+     * the payment token could sell the NFT in the middle of its own claim and keep both the money and the garment.
+     */
+    function test_PaidClaimBurnsTheNftBeforeItCollectsTheFee() public {
+        CallbackTokenMock token = new CallbackTokenMock();
+        (Prenda other, OpenMinterMock otherMinter, OpenMarketMock otherMarket) = _deployWith(token);
+        DoubleDipHolderMock cheater = new DoubleDipHolderMock(other, IMover(address(otherMarket)), stranger);
+        otherMinter.mint(address(cheater), TOKEN, _terms(), CONTENT_HASH);
+        vm.warp(soldAt + FREE_PERIOD + 30 days);
+        token.mint(address(cheater), FEE);
+        cheater.prepare(TOKEN, token, FEE);
+
+        cheater.claim(FEE);
+
+        assertTrue(cheater.callbackRan());
+        assertFalse(cheater.nftExistedDuringPayment());
+        assertFalse(cheater.resaleDuringPaymentWorked());
+        assertFalse(cheater.secondClaimDuringPaymentWorked());
+        assertEq(other.balanceOf(stranger), 0);
+        assertEq(other.balanceOf(address(cheater)), 0);
+        assertEq(token.balanceOf(treasury), FEE);
+        vm.expectRevert(_nonexistent(TOKEN));
+        other.ownerOf(TOKEN);
     }
 
     function test_ClaimWorksWhilePaused() public {
@@ -564,6 +753,28 @@ contract PrendaTest is Test {
         assertEq(prenda.balanceOf(bob), 0);
     }
 
+    function test_ContractWalletCanApproveAMarketAndClaimPaying() public {
+        WalletMock wallet = new WalletMock(alice);
+        _sell(address(wallet), TOKEN);
+        _sell(address(wallet), TOKEN + 1);
+        vm.warp(soldAt + FREE_PERIOD + 30 days);
+
+        vm.startPrank(alice);
+        usdt.mint(FEE);
+        usdt.transfer(address(wallet), FEE);
+        wallet.exec(address(usdt), abi.encodeCall(IERC20.approve, (address(prenda), FEE)));
+        wallet.exec(address(prenda), abi.encodeCall(IERC721.setApprovalForAll, (address(market), true)));
+
+        vm.expectEmit(address(prenda));
+        emit Prenda.Claimed(TOKEN, address(wallet), FEE);
+        wallet.exec(address(prenda), abi.encodeCall(Prenda.claim, (TOKEN, FEE)));
+        vm.stopPrank();
+
+        assertEq(usdt.balanceOf(treasury), FEE);
+        market.move(address(wallet), bob, TOKEN + 1);
+        assertEq(prenda.ownerOf(TOKEN + 1), bob);
+    }
+
     function test_RevertWhen_ClaimerIsNotTheHolder() public {
         _sell(alice, TOKEN);
 
@@ -585,6 +796,21 @@ contract PrendaTest is Test {
         prenda.claim(TOKEN, type(uint256).max);
     }
 
+    /// @dev Once transfers are open an operator can move an NFT, but claiming stays with the holder.
+    function test_RevertWhen_AnApprovedOperatorClaimsAfterTransfersAreOpened() public {
+        _sell(alice, TOKEN);
+        vm.prank(admin);
+        prenda.openTransfers();
+        vm.startPrank(alice);
+        prenda.setApprovalForAll(bob, true);
+        prenda.approve(bob, TOKEN);
+        vm.stopPrank();
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Prenda.NotTokenHolder.selector, TOKEN, bob));
+        prenda.claim(TOKEN, type(uint256).max);
+    }
+
     function test_RevertWhen_AdminOrMinterClaimsSomebodyElsesNft() public {
         _sell(alice, TOKEN);
 
@@ -592,7 +818,8 @@ contract PrendaTest is Test {
         vm.expectRevert(abi.encodeWithSelector(Prenda.NotTokenHolder.selector, TOKEN, admin));
         prenda.claim(TOKEN, type(uint256).max);
 
-        vm.expectRevert(abi.encodeWithSelector(Prenda.NotTokenHolder.selector, TOKEN, address(this)));
+        vm.prank(address(minter));
+        vm.expectRevert(abi.encodeWithSelector(Prenda.NotTokenHolder.selector, TOKEN, address(minter)));
         prenda.claim(TOKEN, type(uint256).max);
     }
 
@@ -665,7 +892,7 @@ contract PrendaTest is Test {
     ) public {
         feePerPeriod = uint80(bound(feePerPeriod, 1, 100 * 10 ** 6));
         maxFee = uint80(bound(maxFee, feePerPeriod, 1000 * 10 ** 6));
-        prenda.mint(
+        minter.mint(
             alice,
             TOKEN,
             Prenda.StorageTerms({freePeriod: freePeriod, feePerPeriod: feePerPeriod, maxFee: maxFee}),
@@ -686,6 +913,74 @@ contract PrendaTest is Test {
     }
 
     // ------------------------------------------------------------------------------------------------------------
+    // Claims when the issuer of the payment token blocks an account
+    // (a model of what USDT0's issuer can do, not the real USDT0)
+    // ------------------------------------------------------------------------------------------------------------
+
+    function _blocklistSetup() internal returns (BlocklistTokenMock token, Prenda other) {
+        token = new BlocklistTokenMock();
+        OpenMinterMock otherMinter;
+        (other, otherMinter, ) = _deployWith(token);
+        otherMinter.mint(alice, TOKEN, _terms(), CONTENT_HASH);
+        otherMinter.mint(alice, TOKEN + 1, _terms(), CONTENT_HASH);
+        vm.warp(soldAt + FREE_PERIOD + 30 days);
+        token.mint(alice, 2 * uint256(FEE));
+        vm.prank(alice);
+        token.approve(address(other), 2 * uint256(FEE));
+    }
+
+    function test_PaidClaimReachesATreasuryThatTheIssuerBlocked() public {
+        (BlocklistTokenMock token, Prenda other) = _blocklistSetup();
+        token.setBlocked(treasury, true);
+
+        vm.prank(alice);
+        other.claim(TOKEN, FEE);
+
+        assertEq(token.balanceOf(treasury), FEE);
+    }
+
+    function test_RevertWhen_PaidClaimAndTheIssuerBlockedTheClaimer() public {
+        (BlocklistTokenMock token, Prenda other) = _blocklistSetup();
+        token.setBlocked(alice, true);
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(BlocklistTokenMock.Blocked.selector, alice));
+        other.claim(TOKEN, FEE);
+
+        // Her way out is a claim with no fee: the administration gives the garment more free storage.
+        vm.prank(admin);
+        other.extendFreeStorage(TOKEN, uint48(block.timestamp));
+        vm.prank(alice);
+        other.claim(TOKEN, 0);
+        assertEq(other.balanceOf(alice), 1);
+    }
+
+    /// @dev A known limit: if the issuer blocks the NFT contract, paid claims stop until storage is waived.
+    function test_RevertWhen_PaidClaimAndTheIssuerBlockedTheNftContract() public {
+        (BlocklistTokenMock token, Prenda other) = _blocklistSetup();
+        token.setBlocked(address(other), true);
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(BlocklistTokenMock.Blocked.selector, address(other)));
+        other.claim(TOKEN, FEE);
+
+        // Changing the treasury does not help: the blocked party is the one that moves the money.
+        vm.prank(admin);
+        other.setTreasury(makeAddr("another treasury"));
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(BlocklistTokenMock.Blocked.selector, address(other)));
+        other.claim(TOKEN, FEE);
+
+        // The way out, one garment at a time: more free storage, then a claim that does not touch the token.
+        vm.prank(admin);
+        other.extendFreeStorage(TOKEN, uint48(block.timestamp));
+        vm.prank(alice);
+        other.claim(TOKEN, 0);
+        assertEq(other.balanceOf(alice), 1);
+        assertEq(token.balanceOf(alice), 2 * uint256(FEE));
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
     // Transfers while they are closed
     // ------------------------------------------------------------------------------------------------------------
 
@@ -693,11 +988,11 @@ contract PrendaTest is Test {
         _sell(alice, TOKEN);
 
         vm.startPrank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Prenda.TransferNotAllowed.selector, alice));
+        vm.expectRevert(_transferNotAllowed(alice));
         prenda.transferFrom(alice, bob, TOKEN);
-        vm.expectRevert(abi.encodeWithSelector(Prenda.TransferNotAllowed.selector, alice));
+        vm.expectRevert(_transferNotAllowed(alice));
         prenda.safeTransferFrom(alice, bob, TOKEN);
-        vm.expectRevert(abi.encodeWithSelector(Prenda.TransferNotAllowed.selector, alice));
+        vm.expectRevert(_transferNotAllowed(alice));
         prenda.safeTransferFrom(alice, bob, TOKEN, "");
         vm.stopPrank();
 
@@ -708,9 +1003,9 @@ contract PrendaTest is Test {
         _sell(alice, TOKEN);
 
         vm.startPrank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Prenda.ApprovalNotAllowed.selector, bob));
+        vm.expectRevert(_approvalNotAllowed(bob));
         prenda.approve(bob, TOKEN);
-        vm.expectRevert(abi.encodeWithSelector(Prenda.ApprovalNotAllowed.selector, bob));
+        vm.expectRevert(_approvalNotAllowed(bob));
         prenda.setApprovalForAll(bob, true);
         vm.stopPrank();
     }
@@ -721,17 +1016,18 @@ contract PrendaTest is Test {
 
         // The holder cannot even approve it...
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Prenda.ApprovalNotAllowed.selector, address(rogue)));
+        vm.expectRevert(_approvalNotAllowed(address(rogue)));
         prenda.setApprovalForAll(address(rogue), true);
 
         // ...and it cannot move anything.
-        vm.expectRevert(abi.encodeWithSelector(Prenda.TransferNotAllowed.selector, address(rogue)));
+        vm.expectRevert(_transferNotAllowed(address(rogue)));
         rogue.move(alice, bob, TOKEN);
     }
 
     function test_AuthorizedMarketMovesAnNftItsHolderApproved() public {
         _sell(alice, TOKEN);
         _approveMarket(alice);
+        assertTrue(prenda.isApprovedForAll(alice, address(market)));
 
         vm.expectEmit(address(prenda));
         emit IERC721.Transfer(alice, bob, TOKEN);
@@ -748,23 +1044,31 @@ contract PrendaTest is Test {
         _sell(alice, TOKEN + 1);
         vm.prank(alice);
         prenda.approve(address(market), TOKEN);
+        assertEq(prenda.getApproved(TOKEN), address(market));
 
-        market.safeMove(alice, bob, TOKEN);
+        market.move(alice, bob, TOKEN);
         assertEq(prenda.ownerOf(TOKEN), bob);
 
         // The approval covered that NFT only.
-        vm.expectRevert(
-            abi.encodeWithSelector(IERC721Errors.ERC721InsufficientApproval.selector, address(market), TOKEN + 1)
-        );
+        vm.expectRevert(_notApproved(address(market), TOKEN + 1));
         market.move(alice, bob, TOKEN + 1);
     }
 
     function test_RevertWhen_AuthorizedMarketMovesAnNftItsHolderDidNotApprove() public {
         _sell(alice, TOKEN);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(IERC721Errors.ERC721InsufficientApproval.selector, address(market), TOKEN)
-        );
+        vm.expectRevert(_notApproved(address(market), TOKEN));
+        market.move(alice, bob, TOKEN);
+    }
+
+    function test_RevertWhen_MarketMovesAfterTheHolderRevoked() public {
+        _sell(alice, TOKEN);
+        vm.startPrank(alice);
+        prenda.setApprovalForAll(address(market), true);
+        prenda.setApprovalForAll(address(market), false);
+        vm.stopPrank();
+
+        vm.expectRevert(_notApproved(address(market), TOKEN));
         market.move(alice, bob, TOKEN);
     }
 
@@ -772,20 +1076,63 @@ contract PrendaTest is Test {
     function test_RevertWhen_NewlyAuthorizedMarketMovesExistingNfts() public {
         _sell(alice, TOKEN);
         _approveMarket(alice);
-        OpenMarketMock newMarket = new OpenMarketMock(prenda);
-        vm.prank(admin);
-        prenda.authorizeMarket(address(newMarket));
+        OpenMarketMock newMarket = _authorizeAnotherMarket();
 
-        vm.expectRevert(
-            abi.encodeWithSelector(IERC721Errors.ERC721InsufficientApproval.selector, address(newMarket), TOKEN)
-        );
+        assertFalse(prenda.isApprovedForAll(alice, address(newMarket)));
+        vm.expectRevert(_notApproved(address(newMarket), TOKEN));
         newMarket.move(alice, bob, TOKEN);
-        vm.expectRevert(
-            abi.encodeWithSelector(IERC721Errors.ERC721InsufficientApproval.selector, address(newMarket), TOKEN)
-        );
+        vm.expectRevert(_notApproved(address(newMarket), TOKEN));
         newMarket.move(alice, address(newMarket), TOKEN);
 
         assertEq(prenda.ownerOf(TOKEN), alice);
+    }
+
+    /// @dev Only the holder approves. A market the holder trusted cannot extend that trust to another market.
+    function test_RevertWhen_AnApprovedMarketPassesItsPermissionOn() public {
+        _sell(alice, TOKEN);
+        _approveMarket(alice);
+        OpenMarketMock newMarket = _authorizeAnotherMarket();
+
+        vm.expectRevert(_invalidApprover(address(market)));
+        market.grant(address(newMarket), TOKEN);
+
+        assertEq(prenda.getApproved(TOKEN), address(0));
+        vm.expectRevert(_notApproved(address(newMarket), TOKEN));
+        newMarket.move(alice, bob, TOKEN);
+
+        // The first market still does its own job with the approval alice gave it.
+        market.move(alice, bob, TOKEN);
+        assertEq(prenda.ownerOf(TOKEN), bob);
+    }
+
+    function test_RevertWhen_SomeoneOtherThanTheHolderSetsOrClearsAnApproval() public {
+        _sell(alice, TOKEN);
+        _approveMarket(alice);
+        OpenMarketMock other = _authorizeAnotherMarket();
+        vm.prank(alice);
+        prenda.approve(address(other), TOKEN);
+
+        // Not a market approved for all her NFTs...
+        vm.expectRevert(_invalidApprover(address(market)));
+        market.grant(address(0), TOKEN);
+        // ...not the account that holds the approval for this NFT...
+        vm.expectRevert(_invalidApprover(address(other)));
+        other.grant(address(other), TOKEN);
+        // ...not the administration, not a stranger.
+        vm.prank(admin);
+        vm.expectRevert(_invalidApprover(admin));
+        prenda.approve(address(market), TOKEN);
+        vm.prank(stranger);
+        vm.expectRevert(_invalidApprover(stranger));
+        prenda.approve(address(0), TOKEN);
+
+        assertEq(prenda.getApproved(TOKEN), address(other));
+    }
+
+    function test_RevertWhen_ApprovingAnNftThatDoesNotExist() public {
+        vm.prank(alice);
+        vm.expectRevert(_nonexistent(TOKEN));
+        prenda.approve(address(market), TOKEN);
     }
 
     function test_RevertWhen_MarketMovesFromTheWrongHolder() public {
@@ -796,12 +1143,22 @@ contract PrendaTest is Test {
         market.move(bob, stranger, TOKEN);
     }
 
+    function test_RevertWhen_MarketMovesAnNftToTheNftContractItself() public {
+        _sell(alice, TOKEN);
+        _approveMarket(alice);
+
+        vm.expectRevert(_invalidReceiver(address(prenda)));
+        market.move(alice, address(prenda), TOKEN);
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
+    }
+
     function test_RevertWhen_AdminMovesSomebodyElsesNft() public {
         _sell(alice, TOKEN);
         _approveMarket(alice);
 
         vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(Prenda.TransferNotAllowed.selector, admin));
+        vm.expectRevert(_transferNotAllowed(admin));
         prenda.transferFrom(alice, admin, TOKEN);
     }
 
@@ -813,10 +1170,29 @@ contract PrendaTest is Test {
 
         // The approval alice gave ended with the transfer: the market cannot take the NFT from bob.
         assertEq(prenda.getApproved(TOKEN), address(0));
-        vm.expectRevert(
-            abi.encodeWithSelector(IERC721Errors.ERC721InsufficientApproval.selector, address(market), TOKEN)
-        );
+        vm.expectRevert(_notApproved(address(market), TOKEN));
         market.move(bob, alice, TOKEN);
+    }
+
+    function test_SafeMoveAsksTheReceiverAndAFailedMoveChangesNothing() public {
+        AcceptingReceiverMock accepting = new AcceptingReceiverMock();
+        RejectingReceiverMock rejecting = new RejectingReceiverMock();
+        InertHolderMock inert = new InertHolderMock();
+        _sell(alice, TOKEN);
+        _approveMarket(alice);
+
+        vm.expectRevert(_invalidReceiver(address(rejecting)));
+        market.safeMove(alice, address(rejecting), TOKEN);
+        vm.expectRevert(_invalidReceiver(address(inert)));
+        market.safeMove(alice, address(inert), TOKEN);
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
+        assertEq(prenda.transferCountOf(TOKEN), 0);
+
+        market.safeMove(alice, address(accepting), TOKEN);
+        assertEq(prenda.ownerOf(TOKEN), address(accepting));
+        assertEq(accepting.received(), 1);
+        assertEq(prenda.transferCountOf(TOKEN), 1);
     }
 
     function test_TransferCountGoesUpWithEveryChangeOfHands() public {
@@ -830,6 +1206,17 @@ contract PrendaTest is Test {
 
         assertEq(prenda.transferCountOf(TOKEN), 3);
         assertEq(prenda.transferCountOf(TOKEN + 1), 0);
+    }
+
+    /// @dev Every executed transfer counts, also one that leaves the NFT with the same holder.
+    function test_TransferCountAlsoCountsAMoveToTheSameHolder() public {
+        _sell(alice, TOKEN);
+        _approveMarket(alice);
+
+        market.move(alice, alice, TOKEN);
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
+        assertEq(prenda.transferCountOf(TOKEN), 1);
     }
 
     function test_RevertWhen_MarketMovesWhilePaused() public {
@@ -847,18 +1234,64 @@ contract PrendaTest is Test {
         assertEq(prenda.ownerOf(TOKEN), bob);
     }
 
+    /// @dev Not the holder, not the administration, not a minter, not the treasury, not the receiver: nobody.
+    function testFuzz_NobodyButAnAuthorizedMarketExecutesWhileClosed(address executor, address to) public {
+        vm.assume(executor != address(market));
+        vm.assume(to != address(0) && to != address(prenda));
+        _sell(alice, TOKEN);
+        _approveMarket(alice);
+
+        vm.prank(executor);
+        vm.expectRevert(_transferNotAllowed(executor));
+        prenda.transferFrom(alice, to, TOKEN);
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
+        assertEq(prenda.transferCountOf(TOKEN), 0);
+    }
+
+    function testFuzz_NobodyButAnAuthorizedMarketCanBeApprovedWhileClosed(address operator) public {
+        vm.assume(operator != address(market) && operator != address(0));
+        _sell(alice, TOKEN);
+
+        vm.startPrank(alice);
+        vm.expectRevert(_approvalNotAllowed(operator));
+        prenda.approve(operator, TOKEN);
+        vm.expectRevert(_approvalNotAllowed(operator));
+        prenda.setApprovalForAll(operator, true);
+        vm.stopPrank();
+    }
+
     // ------------------------------------------------------------------------------------------------------------
     // Disabled markets
     // ------------------------------------------------------------------------------------------------------------
 
     function test_RevertWhen_DisabledMarketMoves() public {
         _sell(alice, TOKEN);
+        _sell(alice, TOKEN + 1);
         _approveMarket(alice);
+        vm.prank(alice);
+        prenda.approve(address(market), TOKEN + 1);
         vm.prank(admin);
         prenda.disableMarket(address(market));
 
-        vm.expectRevert(abi.encodeWithSelector(Prenda.TransferNotAllowed.selector, address(market)));
+        vm.expectRevert(_transferNotAllowed(address(market)));
         market.move(alice, bob, TOKEN);
+        vm.expectRevert(_transferNotAllowed(address(market)));
+        market.move(alice, bob, TOKEN + 1);
+    }
+
+    function test_DisabledMarketLosesTheApprovalsItHad() public {
+        _sell(alice, TOKEN);
+        _approveMarket(alice);
+        assertTrue(prenda.isApprovedForAll(alice, address(market)));
+
+        vm.prank(admin);
+        prenda.disableMarket(address(market));
+        assertFalse(prenda.isApprovedForAll(alice, address(market)));
+
+        vm.prank(admin);
+        prenda.openTransfers();
+        assertFalse(prenda.isApprovedForAll(alice, address(market)));
     }
 
     function test_RevertWhen_ApprovingADisabledMarket() public {
@@ -867,9 +1300,9 @@ contract PrendaTest is Test {
         prenda.disableMarket(address(market));
 
         vm.startPrank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Prenda.ApprovalNotAllowed.selector, address(market)));
+        vm.expectRevert(_approvalNotAllowed(address(market)));
         prenda.setApprovalForAll(address(market), true);
-        vm.expectRevert(abi.encodeWithSelector(Prenda.ApprovalNotAllowed.selector, address(market)));
+        vm.expectRevert(_approvalNotAllowed(address(market)));
         prenda.approve(address(market), TOKEN);
         vm.stopPrank();
     }
@@ -883,6 +1316,8 @@ contract PrendaTest is Test {
         prenda.disableMarket(address(market));
 
         vm.startPrank(alice);
+        vm.expectEmit(address(prenda));
+        emit IERC721.ApprovalForAll(alice, address(market), false);
         prenda.setApprovalForAll(address(market), false);
         prenda.approve(address(0), TOKEN);
         vm.stopPrank();
@@ -891,19 +1326,40 @@ contract PrendaTest is Test {
         assertEq(prenda.getApproved(TOKEN), address(0));
     }
 
-    function test_RevertWhen_DisabledMarketMovesAfterTransfersAreOpened() public {
+    /// @dev A market that was switched off cannot use the approvals it had to bring another market in.
+    function test_RevertWhen_DisabledMarketHandsAnApprovalToAnotherMarket() public {
         _sell(alice, TOKEN);
         _approveMarket(alice);
+        OpenMarketMock other = _authorizeAnotherMarket();
+        vm.prank(admin);
+        prenda.disableMarket(address(market));
+
+        vm.expectRevert(_invalidApprover(address(market)));
+        market.grant(address(other), TOKEN);
+        vm.expectRevert(_notApproved(address(other), TOKEN));
+        other.move(alice, stranger, TOKEN);
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
+    }
+
+    function test_RevertWhen_DisabledMarketMovesAfterTransfersAreOpened() public {
+        _sell(alice, TOKEN);
+        _sell(alice, TOKEN + 1);
+        _approveMarket(alice);
+        vm.prank(alice);
+        prenda.approve(address(market), TOKEN + 1);
         vm.startPrank(admin);
         prenda.disableMarket(address(market));
         prenda.openTransfers();
         vm.stopPrank();
 
-        vm.expectRevert(abi.encodeWithSelector(Prenda.TransferNotAllowed.selector, address(market)));
+        vm.expectRevert(_transferNotAllowed(address(market)));
         market.move(alice, bob, TOKEN);
+        vm.expectRevert(_transferNotAllowed(address(market)));
+        market.move(alice, bob, TOKEN + 1);
 
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(Prenda.ApprovalNotAllowed.selector, address(market)));
+        vm.expectRevert(_approvalNotAllowed(address(market)));
         prenda.approve(address(market), TOKEN);
     }
 
@@ -915,8 +1371,44 @@ contract PrendaTest is Test {
         prenda.disableMarket(address(market));
         vm.stopPrank();
 
-        vm.expectRevert(abi.encodeWithSelector(Prenda.TransferNotAllowed.selector, address(market)));
+        vm.expectRevert(_transferNotAllowed(address(market)));
         market.move(alice, bob, TOKEN);
+    }
+
+    /// @dev With transfers open anybody can be approved, so a disabled market must not be able to approve anybody.
+    function test_RevertWhen_DisabledMarketHandsAnApprovalToSomeoneAfterTransfersAreOpened() public {
+        _sell(alice, TOKEN);
+        _approveMarket(alice);
+        vm.startPrank(admin);
+        prenda.disableMarket(address(market));
+        prenda.openTransfers();
+        vm.stopPrank();
+
+        vm.expectRevert(_invalidApprover(address(market)));
+        market.grant(stranger, TOKEN);
+        vm.prank(stranger);
+        vm.expectRevert(_notApproved(stranger, TOKEN));
+        prenda.transferFrom(alice, stranger, TOKEN);
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
+        assertEq(prenda.getApproved(TOKEN), address(0));
+    }
+
+    function test_RevertWhen_MarketDisabledAfterOpeningHandsAnApprovalToSomeone() public {
+        _sell(alice, TOKEN);
+        _approveMarket(alice);
+        vm.startPrank(admin);
+        prenda.openTransfers();
+        prenda.disableMarket(address(market));
+        vm.stopPrank();
+
+        vm.expectRevert(_invalidApprover(address(market)));
+        market.grant(stranger, TOKEN);
+        vm.prank(stranger);
+        vm.expectRevert(_notApproved(stranger, TOKEN));
+        prenda.safeTransferFrom(alice, stranger, TOKEN);
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
     }
 
     // ------------------------------------------------------------------------------------------------------------
@@ -955,6 +1447,7 @@ contract PrendaTest is Test {
 
         vm.prank(alice);
         prenda.setApprovalForAll(stranger, true);
+        assertTrue(prenda.isApprovedForAll(alice, stranger));
         vm.prank(stranger);
         prenda.transferFrom(alice, bob, TOKEN);
 
@@ -972,18 +1465,50 @@ contract PrendaTest is Test {
         assertEq(prenda.ownerOf(TOKEN), bob);
     }
 
+    /// @dev Also with transfers open, only the holder approves: an operator moves NFTs but cannot bring others in.
+    function test_RevertWhen_AnOperatorGivesAnApprovalAfterOpening() public {
+        _sell(alice, TOKEN);
+        vm.prank(admin);
+        prenda.openTransfers();
+        vm.prank(alice);
+        prenda.setApprovalForAll(bob, true);
+
+        vm.prank(bob);
+        vm.expectRevert(_invalidApprover(bob));
+        prenda.approve(stranger, TOKEN);
+
+        vm.prank(bob);
+        prenda.transferFrom(alice, bob, TOKEN);
+        assertEq(prenda.ownerOf(TOKEN), bob);
+    }
+
     function test_RevertWhen_SomeoneWithoutApprovalMovesAfterOpening() public {
         _sell(alice, TOKEN);
         vm.prank(admin);
         prenda.openTransfers();
 
         vm.prank(stranger);
-        vm.expectRevert(abi.encodeWithSelector(IERC721Errors.ERC721InsufficientApproval.selector, stranger, TOKEN));
+        vm.expectRevert(_notApproved(stranger, TOKEN));
         prenda.transferFrom(alice, stranger, TOKEN);
 
         vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(IERC721Errors.ERC721InsufficientApproval.selector, admin, TOKEN));
+        vm.expectRevert(_notApproved(admin, TOKEN));
         prenda.transferFrom(alice, admin, TOKEN);
+    }
+
+    function test_RevertWhen_HolderSendsAnNftToTheNftContractItselfAfterOpening() public {
+        _sell(alice, TOKEN);
+        vm.prank(admin);
+        prenda.openTransfers();
+
+        vm.startPrank(alice);
+        vm.expectRevert(_invalidReceiver(address(prenda)));
+        prenda.transferFrom(alice, address(prenda), TOKEN);
+        vm.expectRevert(_invalidReceiver(address(prenda)));
+        prenda.safeTransferFrom(alice, address(prenda), TOKEN);
+        vm.stopPrank();
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
     }
 
     function test_RevertWhen_HolderTransfersWhilePausedAfterOpening() public {
@@ -1004,7 +1529,8 @@ contract PrendaTest is Test {
 
     function test_RevertWhen_SomeoneElseUsesTheAdministrationSwitches() public {
         _sell(alice, TOKEN);
-        address[3] memory callers = [stranger, alice, address(this)];
+        OpenMarketMock other = new OpenMarketMock(prenda);
+        address[4] memory callers = [stranger, alice, address(minter), address(market)];
 
         for (uint256 i = 0; i < callers.length; i++) {
             address caller = callers[i];
@@ -1012,9 +1538,11 @@ contract PrendaTest is Test {
             vm.startPrank(caller);
 
             vm.expectRevert(expected);
-            prenda.setMinter(address(market), true);
+            prenda.setMinter(address(other), true);
             vm.expectRevert(expected);
-            prenda.authorizeMarket(address(usdt));
+            prenda.setMinter(address(minter), false);
+            vm.expectRevert(expected);
+            prenda.authorizeMarket(address(other));
             vm.expectRevert(expected);
             prenda.disableMarket(address(market));
             vm.expectRevert(expected);
@@ -1037,23 +1565,71 @@ contract PrendaTest is Test {
     }
 
     function test_SetMinterAllowsAndStopsAModule() public {
+        OpenMinterMock other = new OpenMinterMock(prenda);
+
         vm.startPrank(admin);
         vm.expectEmit(address(prenda));
-        emit Prenda.MinterSet(address(market), true);
-        prenda.setMinter(address(market), true);
-        assertTrue(prenda.isMinter(address(market)));
+        emit Prenda.MinterSet(address(other), true);
+        prenda.setMinter(address(other), true);
+        assertTrue(prenda.isMinter(address(other)));
 
         vm.expectEmit(address(prenda));
-        emit Prenda.MinterSet(address(market), false);
-        prenda.setMinter(address(market), false);
-        assertFalse(prenda.isMinter(address(market)));
+        emit Prenda.MinterSet(address(other), false);
+        prenda.setMinter(address(other), false);
+        assertFalse(prenda.isMinter(address(other)));
         vm.stopPrank();
     }
 
-    function test_RevertWhen_MinterIsNotAContract() public {
+    /// @dev Accounts that are not a module built for this NFT contract, each for a different reason.
+    function _notModules() internal returns (address[8] memory) {
+        (Prenda otherPrenda, OpenMinterMock otherMinter, ) = _deployWith(usdt);
+        return [
+            stranger, // an ordinary wallet
+            address(usdt), // a contract that knows nothing about this project
+            address(new RevertingToken()), // a contract that fails on every call
+            address(otherMinter), // a module built for another NFT contract
+            address(otherPrenda), // another NFT contract
+            address(2), // an account that answers 32 bytes that are not this contract
+            address(new FailingAnswerMock(address(prenda))), // names this contract, but by failing
+            address(new LongAnswerMock(address(prenda))) // names this contract, followed by something else
+        ];
+    }
+
+    function test_RevertWhen_MinterIsNotAModuleOfThisContract() public {
+        address[8] memory wrong = _notModules();
+
+        vm.startPrank(admin);
+        for (uint256 i = 0; i < wrong.length; i++) {
+            vm.expectRevert(abi.encodeWithSelector(Prenda.NotAModule.selector, wrong[i]));
+            prenda.setMinter(wrong[i], true);
+        }
+        vm.expectRevert(abi.encodeWithSelector(Prenda.NotAModule.selector, address(prenda)));
+        prenda.setMinter(address(prenda), true);
+        vm.stopPrank();
+    }
+
+    function test_RevertWhen_MarketIsNotAModuleOfThisContract() public {
+        address[8] memory wrong = _notModules();
+
+        vm.startPrank(admin);
+        for (uint256 i = 0; i < wrong.length; i++) {
+            vm.expectRevert(abi.encodeWithSelector(Prenda.NotAModule.selector, wrong[i]));
+            prenda.authorizeMarket(wrong[i]);
+        }
+        vm.expectRevert(abi.encodeWithSelector(Prenda.NotAModule.selector, address(prenda)));
+        prenda.authorizeMarket(address(prenda));
+        vm.stopPrank();
+    }
+
+    /// @dev Stopping a module must always be possible, whatever that account answers by then.
+    function test_RemovingAMinterAsksNothingFromIt() public {
+        vm.etch(address(minter), "");
+        assertEq(address(minter).code.length, 0);
+
         vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(Prenda.NotAContract.selector, stranger));
-        prenda.setMinter(stranger, true);
+        prenda.setMinter(address(minter), false);
+
+        assertFalse(prenda.isMinter(address(minter)));
     }
 
     function test_AuthorizeAndDisableAMarket() public {
@@ -1073,12 +1649,6 @@ contract PrendaTest is Test {
         vm.stopPrank();
     }
 
-    function test_RevertWhen_MarketIsNotAContract() public {
-        vm.prank(admin);
-        vm.expectRevert(abi.encodeWithSelector(Prenda.NotAContract.selector, stranger));
-        prenda.authorizeMarket(stranger);
-    }
-
     function test_RevertWhen_AuthorizingAMarketTwice() public {
         vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(Prenda.MarketAlreadyRegistered.selector, address(market)));
@@ -1095,9 +1665,13 @@ contract PrendaTest is Test {
     }
 
     function test_RevertWhen_DisablingAMarketThatIsNotAuthorized() public {
+        OpenMarketMock neverAuthorized = new OpenMarketMock(prenda);
+
         vm.startPrank(admin);
         vm.expectRevert(abi.encodeWithSelector(Prenda.MarketNotAuthorized.selector, stranger));
         prenda.disableMarket(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Prenda.MarketNotAuthorized.selector, address(neverAuthorized)));
+        prenda.disableMarket(address(neverAuthorized));
 
         prenda.disableMarket(address(market));
         vm.expectRevert(abi.encodeWithSelector(Prenda.MarketNotAuthorized.selector, address(market)));
@@ -1151,6 +1725,49 @@ contract PrendaTest is Test {
         vm.stopPrank();
     }
 
+    /// @dev The pause is for sales and transfers. Approvals, claims and every administration switch keep working.
+    function test_PauseStopsNothingButMintsAndTransfers() public {
+        _sell(alice, TOKEN);
+        OpenMarketMock otherMarket = new OpenMarketMock(prenda);
+        OpenMinterMock otherMinter = new OpenMinterMock(prenda);
+        address newAdmin = makeAddr("new admin");
+        vm.prank(admin);
+        prenda.pause();
+
+        // Holders: approvals and revocations.
+        vm.startPrank(alice);
+        prenda.setApprovalForAll(address(market), true);
+        prenda.approve(address(market), TOKEN);
+        prenda.approve(address(0), TOKEN);
+        prenda.setApprovalForAll(address(market), false);
+        vm.stopPrank();
+
+        // Administration: every switch.
+        vm.startPrank(admin);
+        prenda.extendFreeStorage(TOKEN, uint48(soldAt + FREE_PERIOD + 1));
+        prenda.setTreasury(makeAddr("another treasury"));
+        prenda.setMinter(address(otherMinter), true);
+        prenda.setMinter(address(otherMinter), false);
+        prenda.authorizeMarket(address(otherMarket));
+        prenda.disableMarket(address(otherMarket));
+        prenda.setBaseURI("https://elsewhere.test/");
+        prenda.openTransfers();
+        prenda.transferOwnership(newAdmin);
+        vm.stopPrank();
+        vm.prank(newAdmin);
+        prenda.acceptOwnership();
+
+        // Views.
+        assertEq(prenda.ownerOf(TOKEN), alice);
+        assertEq(prenda.storageFeeOf(TOKEN), 0);
+        assertEq(prenda.tokenURI(TOKEN), "https://elsewhere.test/1");
+
+        // Transfers are still stopped, by any route.
+        vm.prank(alice);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        prenda.safeTransferFrom(alice, bob, TOKEN);
+    }
+
     function test_AdministrationChangesHandsInTwoSteps() public {
         address newAdmin = makeAddr("new admin");
 
@@ -1177,6 +1794,29 @@ contract PrendaTest is Test {
         prenda.pause();
         vm.prank(newAdmin);
         prenda.pause();
+    }
+
+    function test_AdministrationHandoverCanBeRedirectedAndCancelled() public {
+        address first = makeAddr("first candidate");
+        address second = makeAddr("second candidate");
+
+        vm.startPrank(admin);
+        prenda.transferOwnership(first);
+        prenda.transferOwnership(second);
+        vm.stopPrank();
+
+        vm.prank(first);
+        vm.expectRevert(_unauthorized(first));
+        prenda.acceptOwnership();
+
+        // Cancelling: nobody is pending and nobody can accept. The administration never becomes the zero address.
+        vm.prank(admin);
+        prenda.transferOwnership(address(0));
+        assertEq(prenda.pendingOwner(), address(0));
+        vm.prank(second);
+        vm.expectRevert(_unauthorized(second));
+        prenda.acceptOwnership();
+        assertEq(prenda.owner(), admin);
     }
 
     function test_RevertWhen_RenouncingTheAdministration() public {

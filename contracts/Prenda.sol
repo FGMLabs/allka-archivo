@@ -9,6 +9,12 @@ import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
+/// @notice What a sale or market module must answer for {Prenda} to accept it.
+interface IPrendaModule {
+    /// @notice The NFT contract this module was built for.
+    function prenda() external view returns (address);
+}
+
 /**
  * @title Prenda
  * @notice One NFT for each physical allka garment. Whoever holds the NFT can claim the garment: claiming burns the
@@ -19,8 +25,12 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
  *
  * - Minters (the `Venta` modules) create the NFTs. A token id can be created only once, ever.
  * - Markets (the `Mercado` modules) are the only ones that can move an NFT between holders while transfers are
- *   closed. A market can only move an NFT whose holder approved that market, as in any ERC-721: being authorized
- *   here gives a market no power over anybody's NFT.
+ *   closed. A market can only move an NFT whose holder approved that market: being authorized here gives a market
+ *   no power over anybody's NFT.
+ *
+ * Approvals are stricter than in a plain ERC-721, so that the rules above do not depend on how any market is
+ * written: only the holder can approve somebody (an approved operator cannot pass its permission on), only an
+ * account that may move tokens can be approved, and a market that was disabled loses every approval it had.
  *
  * What the administration can never do: move or burn somebody else's NFT, raise a storage fee, or create again a
  * token id that was already used.
@@ -80,10 +90,11 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
     mapping(uint256 tokenId => bytes32) private _contentHashes;
     string private _baseTokenURI;
 
-    /// @notice A garment was sold for the first time and its NFT was created.
+    /// @notice A garment was sold for the first time and its NFT was created by the module `minter`.
     event Minted(
         uint256 indexed tokenId,
         address indexed to,
+        address indexed minter,
         uint48 freeUntil,
         uint80 feePerPeriod,
         uint80 maxFee,
@@ -104,6 +115,7 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
     event BaseURIChanged(string newBaseURI);
 
     error NotAContract(address account);
+    error NotAModule(address account);
     error InvalidTreasury(address account);
     error NotMinter(address caller);
     error TokenIdAlreadyUsed(uint256 tokenId);
@@ -177,7 +189,7 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
     /**
      * @notice Creates the NFT of a garment for its first buyer. Only minter modules can call it, and only while the
      * contract is not paused. Collecting the price is the job of the module.
-     * @param to First holder.
+     * @param to First holder. Not this contract.
      * @param tokenId Number of the garment. It must never have been used, not even by an NFT already burned.
      * @param terms Storage rules of the garment. The free period starts now.
      * @param contentHash_ Fingerprint of the data of the NFT, so that later changes can be detected. Not zero.
@@ -188,7 +200,8 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
         StorageTerms calldata terms,
         bytes32 contentHash_
     ) external whenNotPaused {
-        if (!isMinter[_msgSender()]) revert NotMinter(_msgSender());
+        address minter = _msgSender();
+        if (!isMinter[minter]) revert NotMinter(minter);
         if (contentHash_ == bytes32(0)) revert EmptyContentHash();
         if (terms.feePerPeriod == 0 ? terms.maxFee != 0 : terms.maxFee < terms.feePerPeriod) {
             revert InvalidStorageTerms(terms.feePerPeriod, terms.maxFee);
@@ -207,32 +220,35 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
 
         // `_mint` and not `_safeMint`: the module must not hand control to the buyer in the middle of a sale.
         _mint(to, tokenId);
-        emit Minted(tokenId, to, freeUntil, terms.feePerPeriod, terms.maxFee, contentHash_);
+        emit Minted(tokenId, to, minter, freeUntil, terms.feePerPeriod, terms.maxFee, contentHash_);
     }
 
     // ------------------------------------------------------------------------------------------------------------
     // Administration
     // ------------------------------------------------------------------------------------------------------------
 
-    /// @notice Allows or stops a module from creating NFTs.
+    /// @notice Allows or stops a module from creating NFTs. Only a module built for this contract can be allowed.
     function setMinter(address minter, bool allowed) external onlyOwner {
-        if (allowed && minter.code.length == 0) revert NotAContract(minter);
+        if (allowed) _requireModule(minter);
         isMinter[minter] = allowed;
         emit MinterSet(minter, allowed);
     }
 
     /**
      * @notice Registers a market. From then on it can move the NFTs whose holders approve it, and no others.
-     * A market can be registered only once.
+     * Only a module built for this contract can be registered, and only once.
      */
     function authorizeMarket(address market) external onlyOwner {
-        if (market.code.length == 0) revert NotAContract(market);
+        _requireModule(market);
         if (marketStatus[market] != MarketStatus.None) revert MarketAlreadyRegistered(market);
         marketStatus[market] = MarketStatus.Authorized;
         emit MarketAuthorized(market);
     }
 
-    /// @notice Turns a market off for good. It can never move an NFT again, not even after transfers are opened.
+    /**
+     * @notice Turns a market off for good. It can never move an NFT again, not even after transfers are opened,
+     * and the approvals holders gave it stop counting.
+     */
     function disableMarket(address market) external onlyOwner {
         if (marketStatus[market] != MarketStatus.Authorized) revert MarketNotAuthorized(market);
         marketStatus[market] = MarketStatus.Disabled;
@@ -323,6 +339,14 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
         return _records[tokenId].used;
     }
 
+    /**
+     * @notice Whether `operator` can move every NFT of `holder`. An approval only counts while its operator may
+     * move tokens: a market that was disabled is nobody's operator any more.
+     */
+    function isApprovedForAll(address holder, address operator) public view override returns (bool) {
+        return _mayMoveTokens(operator) && super.isApprovedForAll(holder, operator);
+    }
+
     // ------------------------------------------------------------------------------------------------------------
     // Internal
     // ------------------------------------------------------------------------------------------------------------
@@ -344,8 +368,21 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
         return transfersOpen ? status != MarketStatus.Disabled : status == MarketStatus.Authorized;
     }
 
+    /**
+     * @dev A module is a contract that names this contract as its NFT contract. This guards against registering a
+     * wrong address by mistake, and it means the administration can only register, and later disable, contracts
+     * built for this NFT contract. It does not prove that a module is safe: each module needs its own review.
+     */
+    function _requireModule(address module) private view {
+        (bool success, bytes memory answer) = module.staticcall(abi.encodeCall(IPrendaModule.prenda, ()));
+        bytes32 expected = bytes32(uint256(uint160(address(this))));
+        if (!success || answer.length != 32 || bytes32(answer) != expected) revert NotAModule(module);
+    }
+
     /// @dev Adds the transfer rules of this contract. Creating and burning an NFT are not transfers.
     function _update(address to, uint256 tokenId, address auth) internal override returns (address) {
+        // An NFT held by this contract could never be claimed or moved again.
+        if (to == address(this)) revert ERC721InvalidReceiver(to);
         if (to != address(0) && _ownerOf(tokenId) != address(0)) {
             _requireNotPaused();
             if (!_mayMoveTokens(auth)) revert TransferNotAllowed(auth);
@@ -354,8 +391,12 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
         return super._update(to, tokenId, auth);
     }
 
-    /// @dev Only an account that may move tokens can be approved. Clearing an approval is always possible.
+    /**
+     * @dev Only the holder sets or clears the approval of an NFT, and only an account that may move tokens can be
+     * approved. `auth` is zero only when the library clears the approval during a transfer or a burn.
+     */
     function _approve(address to, uint256 tokenId, address auth, bool emitEvent) internal override {
+        if (auth != address(0) && auth != _requireOwned(tokenId)) revert ERC721InvalidApprover(auth);
         if (to != address(0) && !_mayMoveTokens(to)) revert ApprovalNotAllowed(to);
         super._approve(to, tokenId, auth, emitEvent);
     }

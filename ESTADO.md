@@ -70,16 +70,58 @@ Decisiones tomadas al escribirlo. Las que dicen "a confirmar" son propuestas del
 - La moneda de la guarda queda fija al desplegar. La tesorería vive en `Prenda` y los módulos `Venta` y `Mercado` la leen de ahí: un solo cambio alcanza a todo.
 - Cada NFT cuenta cuántas veces cambió de manos. El Mercado lo va a usar para descartar publicaciones hechas por un dueño anterior.
 - El NFT se crea sin pasarle el control al comprador en medio de la compra (`_mint` y no `_safeMint`).
-- Los módulos de venta y los Mercados tienen que ser contratos, no billeteras comunes. Es una traba contra autorizar por error una dirección equivocada.
-- A confirmar: mientras las transferencias estén cerradas, solo se le puede dar permiso a un Mercado autorizado.
+- Un NFT no se puede crear ni enviar a la dirección del propio contrato: ahí quedaría perdido.
+- Cada módulo de venta y cada Mercado tiene que declarar que fue hecho para este contrato. Es una traba contra registrar por error otra dirección, y hace que la administración no pueda registrar (y después bloquear) billeteras o contratos ajenos.
+- El aviso que deja cada NFT al crearse dice qué módulo lo creó.
+- A confirmar: permisos más estrictos que en un NFT común. Solo los da el dueño, solo a quien puede mover NFT (con las transferencias cerradas, solo a un Mercado autorizado), y un Mercado apagado pierde los que tenía.
 - A confirmar: la dirección web de los datos de los NFT se puede cambiar; lo que no se puede cambiar es la huella de los datos de cada NFT.
 - A confirmar: la administración no se puede abandonar, para que el contrato nunca quede sin nadie que pueda pausar o cambiar la tesorería.
 
-Cómo se probó: tests de cada función, incluidos los caminos que deben fallar, con valores al azar para la guarda y el reclamo. Además se rompió el contrato a propósito, una regla por vez, para comprobar que algún test lo nota.
+Cómo se probó:
+
+- Tests de cada función, incluidos los caminos que deben fallar, con valores al azar para la guarda y el reclamo.
+- Dueños que son contratos en vez de billeteras comunes, un token de pago que bloquea cuentas (como puede hacer el emisor de USDT0) y otro que intenta colarse en medio de un reclamo.
+- Secuencias al azar de miles de operaciones (ventas, reventas, reclamos, pausas, perdones, cambios de tesorería) que comparan el contrato contra una contabilidad aparte después de cada paso.
+- Además se rompe el contrato a propósito, una regla por vez, para comprobar que algún test lo nota.
+
+### Revisión independiente de `Prenda` (26/11/2026)
+
+La hizo un revisor aparte, que no vio cómo se escribió el contrato. No encontró fallas críticas ni altas. Encontró una media y varias menores. No reemplaza a la auditoría externa.
+
+Corregido:
+
+- Media: un Mercado con permiso podía pasarle ese permiso a otra dirección, y un Mercado apagado seguía pudiendo hacerlo. Si ese Mercado fallaba o era malicioso, alcanzaba para mover NFT ajenos. Ahora los permisos los da solo el dueño y un Mercado apagado pierde los que tenía.
+- Un NFT enviado al propio contrato quedaba perdido. Ahora ese envío se rechaza.
+- El aviso de creación de cada NFT no decía qué módulo lo creó. Ahora lo dice.
+- Pedir solo que un módulo "sea un contrato" era una traba débil, y dejaba a la administración registrar y bloquear cualquier contrato. Ahora cada módulo declara para qué contrato fue hecho.
+- Tests: el revisor mostró 14 cambios al contrato que los tests originales no notaban. Se sumaron tests para todos, más los de la lista de arriba.
+
+Decisiones que quedan abiertas. Ninguna frena la versión 1 en testnet, pero hay que tomarlas antes de mainnet porque `Prenda` después no se puede cambiar:
+
+1. Perdón general de guarda. Si el emisor de USDT0 bloqueara la dirección de `Prenda`, o si USDT0 dejara de funcionar, los reclamos con guarda quedan frenados y hoy la salida es perdonar prenda por prenda. Propuesta: un perdón para todas a la vez.
+2. Cambio de tesorería en dos pasos: que la billetera nueva tenga que confirmar. Evita mandar la plata a una dirección mal escrita. Pide que la tesorería sea una billetera propia y no la dirección de depósito de un exchange.
+3. Una llave que solo pueda pausar, para no depender de la llave guardada en una emergencia.
+4. Que el reclamo lleve el número del pedido. Ata la quema a los datos de envío sin depender de una firma, que algunas billeteras-contrato no pueden dar.
+5. Un tope de guarda fijo dentro de `Prenda`, además del que tenga `Venta`.
+6. Qué cubre exactamente la huella de cada NFT. Se define junto con el catálogo, en la Fase 2.
+7. Extras opcionales: aviso de cambio de datos (ERC-4906), datos de la colección y cantidad total de NFT.
+8. Un rescate para tokens enviados por error al contrato.
+
+Límites conocidos que se suman:
+
+- Que un módulo declare para qué contrato fue hecho no prueba que sea seguro. Cada módulo necesita su propia revisión.
+- El contador de cambios de manos también cuenta un movimiento que deja el NFT en el mismo dueño.
+- Un perdón de guarda con la fecha mal escrita no se puede deshacer. El error siempre queda a favor del dueño de la prenda.
+- Si compra un contrato que después no puede operar, su NFT queda trabado. Es responsabilidad de ese comprador.
+- La llave de administración también es la llave del stock sin vender: quien la tenga puede sumar un módulo de venta falso, crear NFT y reclamarlos.
+
+Para tener en cuenta en `Mercado`: tiene que ser inmutable y entregar el NFT con la transferencia simple. Las publicaciones necesitan cancelación y vencimiento, porque una publicación vieja puede revivir si el dueño le quita el permiso al Mercado y más adelante se lo vuelve a dar.
+
+Para tener en cuenta en la Etapa 2 (tarjeta): no hay forma de quitar un NFT después de un contracargo, y pagar la guarda con tarjeta implica que FGM la perdone en la cadena.
 
 Pendientes que salieron al escribirlo:
 
-- Fase 4: antes de despachar, el servidor tiene que comprobar que el NFT quemado nació de una venta oficial, además de que la quema esté finalizada.
+- Fase 4: antes de despachar, el servidor tiene que comprobar que el NFT quemado nació de una venta oficial (el aviso de creación dice qué módulo lo creó), además de que la quema esté finalizada.
 - Antes de mainnet: la dirección de administración debería ser una billetera de varias firmas, y hay que vigilar los avisos de cambios de administración (tesorería, módulos de venta y Mercados nuevos).
 
 ## Tecnologías
@@ -98,7 +140,7 @@ Volver a verificar antes de usarlos. Fecha de la verificación entre paréntesis
 - Finalidad: la etiqueta `finalized` corresponde a bloques finalizados por la cadena PoS y tarda unas 400 confirmaciones (19/11/2026). https://doc.confluxnetwork.org/docs/espace/build/transaction
 - La actualización v3.0 de Conflux incluyó CIP-645, que alinea eSpace con el EVM (MCOPY, almacenamiento transitorio), y CIP-7702 (26/11/2026). https://github.com/Conflux-Chain/conflux-rust/releases/tag/v3.0.0
 - USDT0 en eSpace mainnet: `0xAf37E8B6c9ED7F6318979F56Fc287d76C30847FF`, 6 decimales, acepta pagos autorizados por firma (EIP-3009). La página no da direcciones de testnet (19/11/2026). https://doc.confluxnetwork.org/docs/espace/tutorials/x402/
-- USDT0, según la auditoría de OpenZeppelin del 29/01/2025: actualizable; su dueño puede bloquear cuentas; una cuenta bloqueada no puede enviar pero sí recibir. La auditoría cubre la versión de Arbitrum y el contrato pensado para cadenas nuevas, y no menciona a Conflux: confirmar contra el contrato real (19/11/2026). https://www.openzeppelin.com/news/usdt0-audit
+- USDT0, según la auditoría de OpenZeppelin del 29/01/2025: actualizable (no dice quién controla las actualizaciones); su dueño puede bloquear cuentas y quemar los fondos de una cuenta bloqueada; una cuenta bloqueada puede recibir, pero no puede enviar ni ejecutar transferencias por cuenta de otros; el rol del puente puede quemar cualquier saldo. La auditoría cubre la versión de Arbitrum y el contrato pensado para cadenas nuevas, y no menciona a Conflux: confirmar contra el contrato real (releída el 26/11/2026). https://www.openzeppelin.com/news/usdt0-audit
 - Verificación del código en ConfluxScan desde Hardhat: API de testnet `https://evmapi-testnet.confluxscan.org/api/` y de mainnet `https://evmapi.confluxscan.org/api/` (26/11/2026). https://doc.confluxnetwork.org/docs/espace/tutorials/VerifyContracts
 - Solidity: se eligió la 0.8.38 (publicada el 22/10/2026) con pragma exacto; un repaso de seguridad del 06/11/2026 la da como la única versión sin errores conocidos (26/11/2026). https://guardian.security/blog/which-solidity-version-to-use/
 - OpenZeppelin Contracts: la versión auditada que instala npm es la 5.6.1 (26/11/2026). https://docs.openzeppelin.com/contracts/5.x
@@ -107,7 +149,8 @@ Volver a verificar antes de usarlos. Fecha de la verificación entre paréntesis
 ## Antes de mainnet
 
 - Auditoría externa de los contratos. Punto central: que ningún Mercado pueda mover un NFT sin permiso de su dueño.
-- Probar todo contra el USDT0 real en una copia de la red.
+- Probar todo contra el USDT0 real en una copia de la red, incluido qué pasa si el emisor bloquea a un comprador, a la tesorería o a los contratos.
+- Tomar las decisiones abiertas de la revisión independiente de `Prenda`.
 - Confirmar el objetivo de EVM con un despliegue de prueba en la testnet de eSpace.
 - Revisión legal y contable del modelo, términos y condiciones y política de privacidad.
 

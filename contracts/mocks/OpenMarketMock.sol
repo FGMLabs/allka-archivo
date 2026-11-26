@@ -1,25 +1,31 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.38;
 
-import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import {Prenda} from "../Prenda.sol";
 
 /**
  * @title OpenMarketMock
- * @notice Test helper. Stands in for a market contract: anyone can ask it to move an NFT. It has no rules of its
- * own, so every limit seen in the tests comes from the NFT contract. Never deploy it to a real network.
+ * @notice Test helper. Stands in for a market module, including one that misbehaves: anyone can ask it to move an
+ * NFT or to hand an approval to somebody else. It has no rules of its own, so every limit seen in the tests comes
+ * from the NFT contract. Never deploy it to a real network.
  */
 contract OpenMarketMock {
-    IERC721 public immutable nft;
+    Prenda public immutable prenda;
 
-    constructor(IERC721 nft_) {
-        nft = nft_;
+    constructor(Prenda prenda_) {
+        prenda = prenda_;
     }
 
     function move(address from, address to, uint256 tokenId) external {
-        nft.transferFrom(from, to, tokenId);
+        prenda.transferFrom(from, to, tokenId);
     }
 
     function safeMove(address from, address to, uint256 tokenId) external {
-        nft.safeTransferFrom(from, to, tokenId);
+        prenda.safeTransferFrom(from, to, tokenId);
+    }
+
+    /// @dev The call a well-behaved market never makes: pass its permission over an NFT on to somebody else.
+    function grant(address to, uint256 tokenId) external {
+        prenda.approve(to, tokenId);
     }
 }
