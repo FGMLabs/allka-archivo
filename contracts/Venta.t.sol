@@ -340,6 +340,31 @@ contract VentaTest is Test {
         vm.stopPrank();
     }
 
+    /**
+     * @dev A known limit, pinned (fourth review): the free period of a drop has no ceiling of its own. 180 days
+     * typed with two zeros too many gives about 49 years of free storage, further than the administration could
+     * ever give with a waiver. It favours the holders and cannot be undone once sold; the way to catch it is to
+     * look at the drop during the day before it opens and close it.
+     */
+    function test_ADropCanGiveAFreePeriodLongerThanAnyWaiver() public {
+        uint32 typo = 180 days * 100;
+        uint48 start = uint48(createdAt + DELAY);
+        vm.prank(operator);
+        venta.createDrop(
+            start,
+            start,
+            bytes32(0),
+            Prenda.StorageTerms({freePeriod: typo, feePerPeriod: FEE, maxFee: MAX_FEE}),
+            _items(TOKEN, 1, PRICE)
+        );
+        vm.warp(start);
+        _buy(alice, TOKEN);
+
+        (uint48 freeUntil, , ) = prenda.storageTermsOf(TOKEN);
+        assertEq(freeUntil, block.timestamp + typo);
+        assertGt(freeUntil, block.timestamp + 20 * prenda.MAX_WAIVER());
+    }
+
     function test_RevertWhen_StorageCeilingIsAboveTheMaximum() public {
         uint48 start = uint48(createdAt + DELAY);
 

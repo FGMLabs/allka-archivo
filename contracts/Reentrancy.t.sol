@@ -8,7 +8,12 @@ import {Hashes} from "@openzeppelin/contracts/utils/cryptography/Hashes.sol";
 import {Mercado} from "./Mercado.sol";
 import {Prenda} from "./Prenda.sol";
 import {Venta} from "./Venta.sol";
-import {BuyerAttackerMock, OperatorTreasuryAttackerMock, SellerAttackerMock} from "./mocks/AttackerMocks.sol";
+import {
+    BuyerAttackerMock,
+    CrossModuleAttackerMock,
+    OperatorTreasuryAttackerMock,
+    SellerAttackerMock
+} from "./mocks/AttackerMocks.sol";
 import {OpenMarketMock} from "./mocks/OpenMarketMock.sol";
 import {OpenMinterMock} from "./mocks/OpenMinterMock.sol";
 import {HookTokenMock} from "./mocks/PaymentTokenMocks.sol";
@@ -428,5 +433,61 @@ contract ReentrancyTest is Test {
             vm.expectRevert(abi.encodeWithSelector(Venta.TokenIdNotAvailable.selector, TOKEN));
             rogue.relist();
         }
+    }
+
+    /**
+     * @dev A known limit, pinned (fourth review): a sale module knows what it sold, but not what another module is
+     * selling. With two modules and a treasury that operates both, the garment being paid for in the first one can
+     * be put into a drop of the second. The buyer still gets exactly what they paid for, and the garment stays "on
+     * sale" in the second module for ever, where every purchase fails and the buyer keeps the money. The site has
+     * to hide a garment whose number is already used.
+     */
+    function test_AGarmentSoldInOneModuleCanBeListedInAnotherButNeverBoughtThere() public {
+        HookTokenMock token = new HookTokenMock();
+        CrossModuleAttackerMock rogue = new CrossModuleAttackerMock();
+        Prenda prenda = new Prenda("Allka Archivo", "ALLKA", token, address(rogue), admin, "https://example.test/nft/");
+        Venta first = new Venta(prenda, address(rogue), DELAY, MIN_PRICE, MAX_STORAGE);
+        Venta second = new Venta(prenda, address(rogue), DELAY, MIN_PRICE, MAX_STORAGE);
+        vm.startPrank(admin);
+        prenda.setMinter(address(first), true);
+        prenda.setMinter(address(second), true);
+        vm.stopPrank();
+        rogue.setModules(first, second, TOKEN);
+
+        Venta.NewItem[] memory items = new Venta.NewItem[](1);
+        items[0] = Venta.NewItem({tokenId: TOKEN, price: PRICE, contentHash: HASH_SEEN});
+        uint48 start = uint48(block.timestamp + DELAY);
+        rogue.createDrop(first, start, _noStorageFee(), items);
+        token.setHooked(address(rogue), true);
+        vm.warp(start);
+        token.mint(alice, PRICE);
+        vm.startPrank(alice);
+        token.approve(address(first), PRICE);
+        first.buy(TOKEN, DROP, PRICE, new bytes32[](0));
+        vm.stopPrank();
+
+        // The buyer got what the first module promised.
+        assertTrue(rogue.hookRan());
+        assertEq(prenda.ownerOf(TOKEN), alice);
+        assertEq(prenda.contentHashOf(TOKEN), HASH_SEEN);
+        assertEq(token.balanceOf(address(rogue)), PRICE);
+
+        // The second module shows the garment in an open drop, not sold...
+        (uint32 dropId, , bool sold, ) = second.itemOf(TOKEN);
+        assertEq(dropId, DROP);
+        assertFalse(sold);
+        assertFalse(second.dropOf(DROP).closed);
+        assertTrue(prenda.isTokenIdUsed(TOKEN));
+
+        // ...but nobody can ever buy it there.
+        vm.warp(block.timestamp + DELAY);
+        token.mint(bob, MIN_PRICE);
+        vm.startPrank(bob);
+        token.approve(address(second), MIN_PRICE);
+        vm.expectRevert(abi.encodeWithSelector(Prenda.TokenIdAlreadyUsed.selector, TOKEN));
+        second.buy(TOKEN, DROP, MIN_PRICE, new bytes32[](0));
+        vm.stopPrank();
+        assertEq(token.balanceOf(bob), MIN_PRICE);
+        assertEq(prenda.ownerOf(TOKEN), alice);
     }
 }

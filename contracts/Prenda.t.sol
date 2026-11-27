@@ -2550,6 +2550,80 @@ contract PrendaTest is Test {
         assertEq(freeUntil, tooFarToday);
     }
 
+    /**
+     * @dev A garment sold with a free period longer than the limit (a drop can set one). Asking for a date that is
+     * not later than its own is "not an extension", whatever the limit says; asking for a later one is beyond the
+     * limit until the garment's date comes within reach. The waiver for all is not blocked by it.
+     */
+    function test_AGarmentWhoseOwnDateIsAlreadyBeyondTheLimit() public {
+        minter.mint(alice, TOKEN, Prenda.StorageTerms(1000 days, FEE, MAX_FEE), CONTENT_HASH);
+        uint48 own = uint48(soldAt + 1000 days);
+
+        vm.startPrank(admin);
+        vm.expectRevert(abi.encodeWithSelector(Prenda.FreeStorageNotExtended.selector, TOKEN, own, own));
+        prenda.extendFreeStorage(TOKEN, own);
+        vm.expectRevert(abi.encodeWithSelector(Prenda.FreeStorageBeyondLimit.selector, own + 1, soldAt + 730 days));
+        prenda.extendFreeStorage(TOKEN, own + 1);
+        prenda.extendFreeStorageForAll(uint48(soldAt + 730 days));
+        vm.stopPrank();
+        (uint48 inForce, , ) = prenda.storageTermsOf(TOKEN);
+        assertEq(inForce, own);
+
+        vm.warp(uint256(own) + 1 - 730 days);
+        vm.prank(admin);
+        prenda.extendFreeStorage(TOKEN, own + 1);
+        (inForce, , ) = prenda.storageTermsOf(TOKEN);
+        assertEq(inForce, own + 1);
+    }
+
+    /**
+     * @dev A known limit, pinned (fourth review): if the issuer of the payment token blocks the NFT contract, the
+     * way out is the waiver for all, but it reaches two years at most. It has to be renewed before it lapses, or
+     * the claims that owe a fee are stuck again until it is.
+     */
+    function test_TheWayOutForABlockedTokenHasToBeRenewedEveryTwoYears() public {
+        (BlocklistTokenMock token, Prenda other) = _blocklistSetup();
+        token.setBlocked(address(other), true);
+        vm.warp(soldAt + FREE_PERIOD + 60 days);
+        token.mint(alice, MAX_FEE);
+        vm.prank(alice);
+        token.approve(address(other), type(uint256).max);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(BlocklistTokenMock.Blocked.selector, address(other)));
+        other.claim(TOKEN, type(uint256).max, ORDER);
+
+        // It cannot be given for good, only two years at a time.
+        uint256 latest = block.timestamp + 730 days;
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(Prenda.FreeStorageBeyondLimit.selector, type(uint48).max, latest));
+        other.extendFreeStorageForAll(type(uint48).max);
+        vm.prank(admin);
+        other.extendFreeStorageForAll(uint48(latest));
+        vm.prank(alice);
+        other.claim(TOKEN, 0, ORDER);
+
+        // Another garment, bought later, is claimed after the waiver lapsed: stuck again.
+        OpenMinterMock otherMinter = new OpenMinterMock(other);
+        vm.prank(admin);
+        other.setMinter(address(otherMinter), true);
+        otherMinter.mint(bob, TOKEN + 2, _terms(), CONTENT_HASH);
+        vm.warp(latest + 30 days);
+        assertEq(other.storageFeeOf(TOKEN + 2), FEE);
+        token.mint(bob, MAX_FEE);
+        vm.startPrank(bob);
+        token.approve(address(other), type(uint256).max);
+        vm.expectRevert(abi.encodeWithSelector(BlocklistTokenMock.Blocked.selector, address(other)));
+        other.claim(TOKEN + 2, type(uint256).max, ORDER);
+        vm.stopPrank();
+
+        // A renewal frees it.
+        vm.prank(admin);
+        other.extendFreeStorageForAll(uint48(block.timestamp + 730 days));
+        vm.prank(bob);
+        other.claim(TOKEN + 2, 0, ORDER);
+        assertEq(other.balanceOf(bob), 0);
+    }
+
     /// @dev A date already in the past is a valid waiver: it forgives part of what is due. For one and for all.
     function test_AWaiverWithADateInThePastForgivesPartOfTheFee() public {
         _sell(alice, TOKEN);

@@ -293,3 +293,38 @@ contract OperatorTreasuryAttackerMock is ITransferHook {
         }
     }
 }
+
+/**
+ * @notice Treasury of the NFT contract and operator of two sale modules. While it is paid for a garment in the
+ * first module, it puts that same garment into a drop of the second one.
+ */
+contract CrossModuleAttackerMock is ITransferHook {
+    Venta public first;
+    Venta public second;
+    uint256 public tokenId;
+    bool public hookRan;
+
+    function setModules(Venta first_, Venta second_, uint256 tokenId_) external {
+        first = first_;
+        second = second_;
+        tokenId = tokenId_;
+    }
+
+    function createDrop(
+        Venta venta,
+        uint48 start,
+        Prenda.StorageTerms calldata terms,
+        Venta.NewItem[] calldata items
+    ) external returns (uint32) {
+        return venta.createDrop(start, start, bytes32(0), terms, items);
+    }
+
+    function onTokenHook(uint8 phase) external {
+        if (phase != 2 || hookRan) return;
+        hookRan = true;
+        Venta.NewItem[] memory items = new Venta.NewItem[](1);
+        items[0] = Venta.NewItem({tokenId: tokenId, price: 10 * 10 ** 6, contentHash: keccak256("other data")});
+        uint48 start = uint48(block.timestamp + second.openingDelay());
+        second.createDrop(start, start, bytes32(0), Prenda.StorageTerms(0, 0, 0), items);
+    }
+}

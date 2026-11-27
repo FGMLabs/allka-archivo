@@ -6,8 +6,8 @@ import { buildModule } from "@nomicfoundation/hardhat-ignition/modules";
  *
  * Never use this module on mainnet. It deploys a test token that anyone can mint, and the account that deploys is
  * also the administration. On mainnet the token is the real USDT0 and the administration is a separate account
- * kept offline. As a safety net, the test token refuses to be deployed on Conflux eSpace mainnet, and it is the
- * first thing this module deploys.
+ * kept offline. As a safety net, the test token can only be deployed on the testnet of Conflux eSpace (chain 71)
+ * and on the local simulated network (31337), and it is the first thing this module deploys.
  *
  * Every value has a default made for testing from a phone: drops can open ten minutes after they are created
  * instead of 24 hours later. The treasury and the operator are the deploying account unless a parameters file

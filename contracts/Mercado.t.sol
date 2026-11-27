@@ -1120,6 +1120,25 @@ contract MercadoTest is Test {
         assertEq(prenda.ownerOf(TOKEN), bob);
     }
 
+    /// @dev The same with the approval of the NFT: a new offer records the count as it is now, and sells.
+    function test_ANewOfferAfterTakingTheApprovalOfTheNftBackSells() public {
+        _sell(alice, TOKEN);
+        vm.startPrank(alice);
+        prenda.approve(address(mercado), TOKEN);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        prenda.approve(address(0), TOKEN);
+        prenda.approve(address(mercado), TOKEN);
+        mercado.list(TOKEN, 2 * PRICE, uint48(start + MAX_DURATION));
+        vm.stopPrank();
+        assertEq(mercado.listingOf(TOKEN).tokenApprovalsRevoked, 1);
+        _fundAndApprove(bob, 2 * uint256(PRICE));
+
+        vm.prank(bob);
+        mercado.buy(TOKEN, 2 * uint256(PRICE));
+
+        assertEq(prenda.ownerOf(TOKEN), bob);
+    }
+
     /// @dev A seller that had taken approvals back before offers under an approval for one NFT: the offer sells.
     function test_OfferUnderAnApprovalForOneNftBySellerWhoTookApprovalsBackBeforeSells() public {
         _sell(alice, TOKEN);
@@ -1427,5 +1446,205 @@ contract MercadoTest is Test {
 
         assertEq(otherPrenda.ownerOf(TOKEN), alice);
         assertEq(token.balanceOf(bob), PRICE);
+    }
+}
+
+/**
+ * @notice One offer on the market against a simple model of when it can be taken (fourth review). The model has no
+ * way back from "dead", so this also checks that no sequence revives an offer, and that nothing a third party does
+ * kills it. It covers what the stateful tests of the three contracts do not: transfers opened, the approval of the
+ * NFT given to a wallet, the market disabled. Random sequences of 32 steps out of 14 kinds of operation.
+ */
+contract MercadoOfferModelTest is Test {
+    uint80 internal constant MIN_PRICE = 10 * 10 ** 6;
+    uint80 internal constant PRICE = 100 * 10 ** 6;
+    /// @dev The NFT on offer, held by alice, and an NFT of carol, a third party.
+    uint256 internal constant X = 7;
+    uint256 internal constant Y = 8;
+
+    address internal admin = makeAddr("admin");
+    address internal treasury = makeAddr("treasury");
+    address internal alice = makeAddr("alice");
+    address internal bob = makeAddr("bob");
+    address internal carol = makeAddr("carol");
+    address internal dave = makeAddr("dave");
+
+    error Probe(bool ok);
+
+    TestUSDT0 internal usdt;
+    Prenda internal prenda;
+    Mercado internal mercado;
+    OpenMarketMock internal otherMarket;
+
+    // The model.
+    bool internal approvesForAll; // alice approves the market for all her NFTs, as stored
+    address internal approvedForX; // the approval of X, as stored
+    bool internal dead; // a count moved, or X changed hands, since the offer
+    bool internal paused;
+    bool internal open;
+    bool internal disabled;
+    bool internal carolForAll;
+    bool internal carolForY;
+
+    function _setUp(uint256 seed) internal {
+        usdt = new TestUSDT0();
+        prenda = new Prenda("Allka Archivo", "ALLKA", usdt, treasury, admin, "");
+        OpenMinterMock minter = new OpenMinterMock(prenda);
+        mercado = new Mercado(prenda, MIN_PRICE);
+        otherMarket = new OpenMarketMock(prenda);
+        vm.startPrank(admin);
+        prenda.setMinter(address(minter), true);
+        prenda.authorizeMarket(address(mercado));
+        prenda.authorizeMarket(address(otherMarket));
+        vm.stopPrank();
+        minter.mint(alice, X, Prenda.StorageTerms(0, 0, 0), keccak256("x"));
+        minter.mint(carol, Y, Prenda.StorageTerms(0, 0, 0), keccak256("y"));
+
+        // The offer is made under the approval for all, the one of X, or both.
+        uint256 mode = seed % 3;
+        vm.startPrank(alice);
+        if (mode != 1) {
+            prenda.setApprovalForAll(address(mercado), true);
+            approvesForAll = true;
+        }
+        if (mode != 0) {
+            prenda.approve(address(mercado), X);
+            approvedForX = address(mercado);
+        }
+        mercado.list(X, PRICE, uint48(block.timestamp + 30 days));
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        usdt.mint(PRICE);
+        usdt.approve(address(mercado), PRICE);
+        vm.stopPrank();
+    }
+
+    /// @dev Tries the purchase and always reverts, so that a purchase that works leaves no trace. The answer is
+    /// in the revert.
+    function probeBuy() external {
+        vm.prank(bob);
+        try mercado.buy(X, PRICE) {
+            revert Probe(true);
+        } catch {
+            revert Probe(false);
+        }
+    }
+
+    function _canBeTaken() internal returns (bool ok) {
+        try this.probeBuy() {
+            revert("unreachable");
+        } catch (bytes memory reason) {
+            require(bytes4(reason) == Probe.selector, "unexpected revert");
+            assembly {
+                ok := mload(add(reason, 36))
+            }
+        }
+    }
+
+    function _step(uint8 op) internal {
+        op = op % 14;
+        address m = address(mercado);
+        if (op == 0) {
+            vm.prank(alice);
+            try prenda.setApprovalForAll(m, true) {
+                approvesForAll = true;
+            } catch {}
+        } else if (op == 1) {
+            vm.prank(alice);
+            prenda.setApprovalForAll(m, false);
+            if (approvesForAll) dead = true;
+            approvesForAll = false;
+        } else if (op == 2) {
+            vm.prank(alice);
+            try prenda.approve(m, X) {
+                approvedForX = m;
+            } catch {}
+        } else if (op == 3) {
+            vm.prank(alice);
+            prenda.approve(address(0), X);
+            if (approvedForX == m) dead = true;
+            approvedForX = address(0);
+        } else if (op == 4) {
+            vm.prank(alice);
+            try prenda.approve(address(otherMarket), X) {
+                if (approvedForX == m) dead = true;
+                approvedForX = address(otherMarket);
+            } catch {}
+        } else if (op == 5) {
+            // X goes to dave through the other market and comes back.
+            if (paused) return;
+            vm.prank(alice);
+            prenda.setApprovalForAll(address(otherMarket), true);
+            vm.prank(dave);
+            prenda.setApprovalForAll(address(otherMarket), true);
+            otherMarket.move(alice, dave, X);
+            otherMarket.move(dave, alice, X);
+            dead = true;
+            approvedForX = address(0);
+        } else if (op == 6) {
+            vm.prank(admin);
+            if (paused) prenda.unpause();
+            else prenda.pause();
+            paused = !paused;
+        } else if (op == 7) {
+            vm.prank(carol);
+            try prenda.setApprovalForAll(m, !carolForAll) {
+                carolForAll = !carolForAll;
+            } catch {}
+        } else if (op == 8) {
+            vm.prank(carol);
+            try prenda.approve(carolForY ? address(0) : m, Y) {
+                carolForY = !carolForY;
+            } catch {}
+        } else if (op == 9) {
+            // A third party offers its own NFT, and somebody takes back what they never gave.
+            vm.prank(carol);
+            try mercado.list(Y, PRICE, uint48(block.timestamp + 1 days)) {} catch {}
+            vm.prank(bob);
+            prenda.setApprovalForAll(m, false);
+        } else if (op == 10) {
+            if (open) return;
+            vm.prank(admin);
+            prenda.openTransfers();
+            open = true;
+        } else if (op == 11) {
+            // Once transfers are open the approval of X can go to a wallet.
+            vm.prank(alice);
+            try prenda.approve(dave, X) {
+                if (approvedForX == m) dead = true;
+                approvedForX = dave;
+            } catch {}
+        } else if (op == 12) {
+            // Third parties try to clear the approval of X.
+            vm.prank(dave);
+            try prenda.approve(address(0), X) {
+                revert("a third party cleared the approval of X");
+            } catch {}
+            vm.prank(address(otherMarket));
+            try prenda.approve(address(0), X) {
+                revert("a market cleared the approval of X");
+            } catch {}
+        } else {
+            // Now and then the market is disabled for good.
+            if (disabled || uint256(keccak256(abi.encode(op, block.timestamp, approvedForX))) % 3 != 0) return;
+            vm.prank(admin);
+            prenda.disableMarket(m);
+            disabled = true;
+        }
+    }
+
+    function testFuzz_AnOfferCanBeTakenExactlyWhenTheModelSaysSoAndNeverRevives(uint256 seed) public {
+        _setUp(seed);
+        bool everRefused;
+        for (uint256 i = 0; i < 32; i++) {
+            _step(uint8(seed >> (8 * i)));
+            if (paused) continue;
+            bool ok = _canBeTaken();
+            bool expected = !dead && !disabled && (approvesForAll || approvedForX == address(mercado));
+            assertEq(ok, expected, "the offer is not as the model says");
+            if (everRefused) assertFalse(ok, "an offer came back");
+            if (!ok) everRefused = true;
+        }
     }
 }

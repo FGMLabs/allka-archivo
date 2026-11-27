@@ -143,7 +143,7 @@ El programa:
 
 Al final dice `successfully deployed` y muestra cuatro direcciones, cada una con su nombre: `TestUSDT0`, `Prenda`, `Venta` y `Mercado`. Copiá esas líneas: son públicas y hay que anotarlas en `ESTADO.md`. También quedan guardadas en la carpeta `ignition\deployments\chain-71` del proyecto.
 
-Qué se desplegó: un USDT0 de prueba que cualquiera puede fabricar, el contrato de las prendas, el de venta y el de reventa. La cuenta de prueba queda como administración, tesorería y operador. Los drops pueden abrir diez minutos después de cargados, en vez de 24 horas, para poder probar.
+Qué se desplegó: un USDT0 de prueba que cualquiera puede fabricar, el contrato de las prendas, el de venta y el de reventa. La cuenta de prueba queda como administración, tesorería y operador. Los drops pueden abrir diez minutos después de cargados, en vez de 24 horas, para poder probar. El contrato de venta acepta esa demora corta solo en la testnet de Conflux eSpace; en cualquier otra red exige al menos 24 horas, y el USDT0 de prueba ni siquiera se puede desplegar fuera de la testnet.
 
 ## Paso 9. Publicar el código en el explorador
 
