@@ -61,6 +61,8 @@ That runs every test: unit and fuzz tests of each contract, random sequences of 
 npx hardhat test solidity --test-profile deep
 ```
 
+To deploy the contracts to the Conflux eSpace testnet, follow [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md) (step by step, in Spanish).
+
 ## Stack
 
 Solidity 0.8.38, OpenZeppelin Contracts 5.6, Hardhat 3 and Conflux eSpace (testnet chain ID 71, mainnet chain ID 1030).

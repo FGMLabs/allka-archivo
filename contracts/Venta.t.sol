@@ -590,6 +590,8 @@ contract VentaTest is Test {
     function test_ClosingADropLeavesTheOtherDropsAlone() public {
         uint32 closed = _createDrop(TOKEN, 1);
         uint32 open = _createDrop(TOKEN + 1, 1);
+        vm.expectEmit(address(venta));
+        emit Venta.DropClosed(closed);
         vm.prank(operator);
         venta.closeDrop(closed);
         vm.warp(createdAt + DELAY);

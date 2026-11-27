@@ -61,6 +61,8 @@ Eso corre todos los tests: los de cada contrato, secuencias al azar de operacion
 npx hardhat test solidity --test-profile deep
 ```
 
+Para desplegar los contratos en la testnet de Conflux eSpace, la guía paso a paso está en [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md).
+
 ## Tecnologías
 
 Solidity 0.8.38, OpenZeppelin Contracts 5.6, Hardhat 3 y Conflux eSpace (testnet con chain ID 71, mainnet con chain ID 1030).

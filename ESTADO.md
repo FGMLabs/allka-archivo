@@ -8,7 +8,7 @@ Bitácora del proyecto: decisiones, avance y pendientes. Se lee al empezar cada 
 
 - Fase 0 terminada. La arquitectura se aprobó el 26/11/2026, ya corregida tras una revisión de seguridad independiente.
 - Fase 1 en curso (contratos).
-  - Hecho: proyecto Hardhat 3, pruebas automáticas en cada cambio (CI), el token de prueba `TestUSDT0` y los tres contratos (`Prenda`, `Venta` y `Mercado`) con sus tests. Dos revisiones independientes: una de `Prenda` y otra de `Venta`, `Mercado` y los tres juntos. Ninguna encontró fallas críticas ni altas; lo que encontraron está corregido. También están escritas las decisiones que el dueño aprobó el 26/11/2026.
+  - Hecho: proyecto Hardhat 3, pruebas automáticas en cada cambio (CI), el token de prueba `TestUSDT0` y los tres contratos (`Prenda`, `Venta` y `Mercado`) con sus tests. Dos revisiones independientes: una de `Prenda` y otra de `Venta`, `Mercado` y los tres juntos. Ninguna encontró fallas críticas ni altas; lo que encontraron está corregido o anotado como límite conocido. También están escritas las decisiones que el dueño aprobó el 26/11/2026.
   - Falta: una revisión independiente de lo que cambió después de esas dos, y el despliegue en la testnet de Conflux eSpace, que se hace desde la computadora del dueño.
 
 ## Decisiones tomadas
@@ -169,6 +169,10 @@ Pendientes que salieron al escribirlo:
 
 Cómo se probaron: tests de cada función con sus caminos de falla, un token de pago que bloquea cuentas, otro que responde "no" en vez de fallar y otro que le pasa el control al comprador y al vendedor en medio de una compra, y secuencias al azar sobre los tres contratos juntos que siguen cada peso: qué tiene que tener cada billetera y qué tiene que haber recibido la tesorería. Además, en TypeScript: el recorrido completo (dos personas compran, se revenden un NFT, una reclama, se carga un drop nuevo, se cierra un drop abierto, y lo que no debe poder hacerse falla), una foto de saldos armada con la librería real de OpenZeppelin y el módulo de despliegue.
 
+Los tres contratos también se rompieron a propósito, una regla por vez, con variantes propias y de los revisores: 327 en total (151 de `Prenda`, 101 de `Venta` y 75 de `Mercado`). Los tests detectaron 326. La que queda no cambia nada: en `Mercado` se comprueba dos veces que el NFT siga en manos del vendedor, y sacar una de las dos comprobaciones da el mismo resultado.
+
+La corrida larga de tests (`--test-profile deep`), con muchos más casos al azar, también pasa.
+
 El despliegue de los cuatro contratos (con el token de prueba) se probó en una red simulada.
 
 ### Segunda revisión independiente (26/11/2026)
@@ -254,6 +258,8 @@ npx hardhat test
 Para probar el despliegue en una red simulada: `npx hardhat ignition deploy ignition/modules/Testnet.ts`. Ese módulo es solo para redes de prueba: despliega un token de prueba y deja a la cuenta que despliega como administración. La única red configurada es la testnet de Conflux eSpace (`--network confluxESpaceTestnet`).
 
 Si la máquina no puede descargar el compilador de Solidity, se puede indicar uno local con la variable `ALLKA_SOLC_PATH` (binario nativo o `soljson.js` de la versión 0.8.38).
+
+Para desplegar en la testnet de Conflux eSpace, paso a paso: [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md). Después del despliegue, `npx hardhat ignition verify chain-71` publica el código en ConfluxScan y `npx hardhat run scripts/create-test-drop.ts --network confluxESpaceTestnet` carga un drop de prueba. Esos tres pasos todavía no se corrieron contra la testnet real.
 
 ## Próximos pasos
 
