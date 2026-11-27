@@ -13,6 +13,7 @@ import {IPaymentCallback} from "./PaymentTokenMocks.sol";
 contract ReentrantSaleBuyerMock is IPaymentCallback {
     Venta public immutable venta;
 
+    uint32 public dropId;
     uint256 public secondTokenId;
     uint256 public secondPrice;
     bytes32[] public secondProof;
@@ -27,22 +28,24 @@ contract ReentrantSaleBuyerMock is IPaymentCallback {
     function buy(
         IERC20 paymentToken,
         uint256 tokenId,
+        uint32 dropId_,
         uint256 price,
         bytes32[] calldata proof,
         uint256 secondTokenId_,
         uint256 secondPrice_
     ) external {
+        dropId = dropId_;
         secondTokenId = secondTokenId_;
         secondPrice = secondPrice_;
         secondProof = proof;
         paymentToken.approve(address(venta), price + secondPrice_);
-        venta.buy(tokenId, price, proof);
+        venta.buy(tokenId, dropId_, price, proof);
     }
 
     function onPayment() external {
         if (callbackRan) return;
         callbackRan = true;
-        try venta.buy(secondTokenId, secondPrice, secondProof) {
+        try venta.buy(secondTokenId, dropId, secondPrice, secondProof) {
             secondPurchaseWorked = true;
         } catch {}
     }

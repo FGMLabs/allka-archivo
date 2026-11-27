@@ -83,7 +83,7 @@ contract DoubleDipHolderMock is IPaymentCallback {
     }
 
     function claim(uint256 maxFeeAccepted) external {
-        prenda.claim(tokenId, maxFeeAccepted);
+        prenda.claim(tokenId, maxFeeAccepted, bytes32(0));
     }
 
     function onPayment() external {
@@ -94,7 +94,7 @@ contract DoubleDipHolderMock is IPaymentCallback {
         try market.move(address(this), accomplice, tokenId) {
             resaleDuringPaymentWorked = true;
         } catch {}
-        try prenda.claim(tokenId, type(uint256).max) {
+        try prenda.claim(tokenId, type(uint256).max, bytes32(0)) {
             secondClaimDuringPaymentWorked = true;
         } catch {}
     }

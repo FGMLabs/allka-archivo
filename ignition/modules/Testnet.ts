@@ -6,7 +6,8 @@ import { buildModule } from "@nomicfoundation/hardhat-ignition/modules";
  *
  * Never use this module on mainnet. It deploys a test token that anyone can mint, and the account that deploys is
  * also the administration. On mainnet the token is the real USDT0 and the administration is a separate account
- * kept offline.
+ * kept offline. As a safety net, the test token refuses to be deployed on Conflux eSpace mainnet, and it is the
+ * first thing this module deploys.
  *
  * Every value has a default made for testing from a phone: drops can open ten minutes after they are created
  * instead of 24 hours later. The treasury and the operator are the deploying account unless a parameters file
@@ -26,16 +27,16 @@ export default buildModule("AllkaArchivoTestnet", (m) => {
   const minPrice = m.getParameter("minPrice", 1_000_000n);
   const maxStorageFee = m.getParameter("maxStorageFee", 100_000_000n);
   const marketMinPrice = m.getParameter("marketMinPrice", 1_000_000n);
-  const maxListingDuration = m.getParameter("maxListingDuration", 30 * 24 * 60 * 60);
 
   const usdt = m.contract("TestUSDT0");
   const prenda = m.contract("Prenda", [name, symbol, usdt, treasury, deployer, baseURI]);
   const venta = m.contract("Venta", [prenda, operator, openingDelay, minPrice, maxStorageFee]);
-  const mercado = m.contract("Mercado", [prenda, marketMinPrice, maxListingDuration]);
+  const mercado = m.contract("Mercado", [prenda, marketMinPrice]);
 
-  // The administration allows the sale module to create NFTs and the market to move the NFTs holders approve.
-  m.call(prenda, "setMinter", [venta, true]);
-  m.call(prenda, "authorizeMarket", [mercado]);
+  // The administration, which here is the deploying account, allows the sale module to create NFTs and the market
+  // to move the NFTs their holders approve.
+  m.call(prenda, "setMinter", [venta, true], { from: deployer });
+  m.call(prenda, "authorizeMarket", [mercado], { from: deployer });
 
   return { usdt, prenda, venta, mercado };
 });

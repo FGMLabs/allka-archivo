@@ -16,6 +16,17 @@ contract TestUSDT0Test is Test {
         assertEq(token.decimals(), 6);
     }
 
+    /// @dev The test deployment starts with this token. If it cannot exist on mainnet, neither can the rest.
+    function test_RevertWhen_DeployedOnConfluxESpaceMainnet() public {
+        vm.chainId(1030);
+        vm.expectRevert(TestUSDT0.NotForMainnet.selector);
+        new TestUSDT0();
+
+        // The testnet of Conflux eSpace is fine.
+        vm.chainId(71);
+        new TestUSDT0();
+    }
+
     function test_StartsWithNoSupply() public view {
         assertEq(token.totalSupply(), 0);
     }

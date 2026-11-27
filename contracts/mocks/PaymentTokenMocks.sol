@@ -66,3 +66,67 @@ contract CallbackTokenMock is ERC20 {
         return super.transferFrom(from, to, value);
     }
 }
+
+interface ITransferHook {
+    /// @dev `phase` 1: the payer, before the tokens move. 2: the receiver, before. 3: the payer, after. 4: the
+    /// receiver, after.
+    function onTokenHook(uint8 phase) external;
+}
+
+/**
+ * @notice Payment token that calls the payer and the receiver, before and after the tokens move, when they asked
+ * for it. It stands for the worst an upgrade of USDT0 could do to a purchase: hand control to either side in the
+ * middle of it.
+ */
+contract HookTokenMock is ERC20 {
+    mapping(address account => bool) public hooked;
+
+    constructor() ERC20("Hook USDT0", "hUSDT0") {}
+
+    function decimals() public pure override returns (uint8) {
+        return 6;
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+
+    function setHooked(address account, bool on) external {
+        hooked[account] = on;
+    }
+
+    function transferFrom(address from, address to, uint256 value) public override returns (bool ok) {
+        if (hooked[from]) ITransferHook(from).onTokenHook(1);
+        if (hooked[to]) ITransferHook(to).onTokenHook(2);
+        ok = super.transferFrom(from, to, value);
+        if (hooked[from]) ITransferHook(from).onTokenHook(3);
+        if (hooked[to]) ITransferHook(to).onTokenHook(4);
+    }
+}
+
+/// @notice Old-style payment token: when the payer cannot pay it answers false instead of failing.
+contract FalseReturningTokenMock {
+    mapping(address account => uint256) public balanceOf;
+    mapping(address holder => mapping(address spender => uint256)) public allowance;
+
+    function decimals() external pure returns (uint8) {
+        return 6;
+    }
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function approve(address spender, uint256 value) external returns (bool) {
+        allowance[msg.sender][spender] = value;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 value) external returns (bool) {
+        if (balanceOf[from] < value || allowance[from][msg.sender] < value) return false;
+        balanceOf[from] -= value;
+        allowance[from][msg.sender] -= value;
+        balanceOf[to] += value;
+        return true;
+    }
+}

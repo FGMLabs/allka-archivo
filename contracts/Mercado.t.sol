@@ -4,21 +4,24 @@ pragma solidity 0.8.38;
 import {Test} from "forge-std/Test.sol";
 import {IERC20Errors, IERC721Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {Mercado} from "./Mercado.sol";
 import {Prenda} from "./Prenda.sol";
 import {ReentrantMarketBuyerMock} from "./mocks/BuyerMocks.sol";
 import {OpenMarketMock} from "./mocks/OpenMarketMock.sol";
 import {OpenMinterMock} from "./mocks/OpenMinterMock.sol";
-import {BlocklistTokenMock, CallbackTokenMock} from "./mocks/PaymentTokenMocks.sol";
+import {BlocklistTokenMock, CallbackTokenMock, FalseReturningTokenMock} from "./mocks/PaymentTokenMocks.sol";
 import {TestUSDT0} from "./mocks/TestUSDT0.sol";
 
 contract MercadoTest is Test {
     uint80 internal constant MIN_PRICE = 10 * 10 ** 6;
+    /// @dev The longest an offer can last. The contract has it as a constant.
     uint48 internal constant MAX_DURATION = 30 days;
     uint80 internal constant PRICE = 100 * 10 ** 6;
     uint256 internal constant FEE = 2 * 10 ** 6;
     uint256 internal constant TOKEN = 1;
+    bytes32 internal constant ORDER = keccak256("order 1");
 
     address internal admin = makeAddr("admin");
     address internal treasury = makeAddr("treasury");
@@ -45,7 +48,7 @@ contract MercadoTest is Test {
     ) internal returns (Prenda newPrenda, OpenMinterMock newMinter, Mercado newMercado) {
         newPrenda = new Prenda("Allka Archivo", "ALLKA", paymentToken, treasury, admin, "https://example.test/nft/");
         newMinter = new OpenMinterMock(newPrenda);
-        newMercado = new Mercado(newPrenda, MIN_PRICE, MAX_DURATION);
+        newMercado = new Mercado(newPrenda, MIN_PRICE);
         vm.startPrank(admin);
         newPrenda.setMinter(address(newMinter), true);
         newPrenda.authorizeMarket(address(newMercado));
@@ -93,6 +96,14 @@ contract MercadoTest is Test {
         assertEq(listing.price, 0);
         assertEq(listing.expiresAt, 0);
         assertEq(listing.transferCount, 0);
+        assertEq(listing.approvalsRevoked, 0);
+    }
+
+    /// @dev A second authorized market through which NFTs can change hands behind the back of the first.
+    function _anotherMarket() internal returns (OpenMarketMock otherMarket) {
+        otherMarket = new OpenMarketMock(prenda);
+        vm.prank(admin);
+        prenda.authorizeMarket(address(otherMarket));
     }
 
     // ------------------------------------------------------------------------------------------------------------
@@ -103,25 +114,20 @@ contract MercadoTest is Test {
         assertEq(address(mercado.prenda()), address(prenda));
         assertEq(address(mercado.paymentToken()), address(usdt));
         assertEq(mercado.minPrice(), MIN_PRICE);
-        assertEq(mercado.maxListingDuration(), MAX_DURATION);
+        assertEq(mercado.MAX_LISTING_DURATION(), 30 days);
         assertEq(mercado.FEE_BPS(), 200);
         assertEq(uint8(prenda.marketStatus(address(mercado))), uint8(Prenda.MarketStatus.Authorized));
     }
 
     function test_RevertWhen_MinimumPriceWouldLetTheFeeRoundToZero() public {
         vm.expectRevert(abi.encodeWithSelector(Mercado.MinimumPriceTooLow.selector, uint80(49)));
-        new Mercado(prenda, 49, MAX_DURATION);
+        new Mercado(prenda, 49);
         vm.expectRevert(abi.encodeWithSelector(Mercado.MinimumPriceTooLow.selector, uint80(0)));
-        new Mercado(prenda, 0, MAX_DURATION);
+        new Mercado(prenda, 0);
 
         // With 50 units the fee is exactly one unit.
-        Mercado smallest = new Mercado(prenda, 50, MAX_DURATION);
+        Mercado smallest = new Mercado(prenda, 50);
         assertEq(smallest.minPrice(), 50);
-    }
-
-    function test_RevertWhen_OffersCouldNotLastAtAll() public {
-        vm.expectRevert(Mercado.ZeroListingDuration.selector);
-        new Mercado(prenda, MIN_PRICE, 0);
     }
 
     // ------------------------------------------------------------------------------------------------------------
@@ -143,6 +149,7 @@ contract MercadoTest is Test {
         assertEq(listing.price, PRICE);
         assertEq(listing.expiresAt, expiresAt);
         assertEq(listing.transferCount, 0);
+        assertEq(listing.approvalsRevoked, 0);
         // The NFT does not move: it stays with its holder until somebody buys it.
         assertEq(prenda.ownerOf(TOKEN), alice);
     }
@@ -197,6 +204,112 @@ contract MercadoTest is Test {
         assertEq(mercado.listingOf(TOKEN).seller, alice);
     }
 
+    function test_ListRecordsHowManyApprovalsTheSellerTookBack() public {
+        _sell(alice, TOKEN);
+        _approveMercado(alice);
+        vm.prank(alice);
+        prenda.setApprovalForAll(address(mercado), false);
+        _approveMercado(alice);
+
+        vm.prank(alice);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+
+        assertEq(mercado.listingOf(TOKEN).approvalsRevoked, 1);
+    }
+
+    /// @dev After the NFT left and came back, the seller offers it again and that new offer sells.
+    function test_SellerCanOfferAgainAfterTheNftCameBack() public {
+        _sellAndList(alice, TOKEN, PRICE);
+        OpenMarketMock otherMarket = _anotherMarket();
+        vm.prank(alice);
+        prenda.setApprovalForAll(address(otherMarket), true);
+        vm.prank(carol);
+        prenda.setApprovalForAll(address(otherMarket), true);
+        otherMarket.move(alice, carol, TOKEN);
+        otherMarket.move(carol, alice, TOKEN);
+
+        vm.prank(alice);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        assertEq(mercado.listingOf(TOKEN).transferCount, 2);
+
+        _fundAndApprove(bob, PRICE);
+        vm.prank(bob);
+        mercado.buy(TOKEN, PRICE);
+        assertEq(prenda.ownerOf(TOKEN), bob);
+    }
+
+    /// @dev The checks run before anything is written: a refused offer leaves the previous one untouched.
+    function test_RefusedOfferLeavesThePreviousOneUntouched() public {
+        _sell(alice, TOKEN);
+        _approveMercado(alice);
+        uint48 expiresAt = uint48(start + 5 days);
+        vm.startPrank(alice);
+        mercado.list(TOKEN, PRICE, expiresAt);
+
+        vm.expectRevert(abi.encodeWithSelector(Mercado.PriceBelowMinimum.selector, MIN_PRICE - 1, MIN_PRICE));
+        mercado.list(TOKEN, MIN_PRICE - 1, expiresAt);
+        vm.stopPrank();
+
+        Mercado.Listing memory listing = mercado.listingOf(TOKEN);
+        assertEq(listing.price, PRICE);
+        assertEq(listing.expiresAt, expiresAt);
+    }
+
+    /// @dev Changing an offer needs the approval of the market just like making it.
+    function test_RevertWhen_ChangingAnOfferWithoutTheApproval() public {
+        _sellAndList(alice, TOKEN, PRICE);
+        vm.startPrank(alice);
+        prenda.setApprovalForAll(address(mercado), false);
+
+        vm.expectRevert(abi.encodeWithSelector(Mercado.MarketNotApproved.selector, TOKEN));
+        mercado.list(TOKEN, 2 * PRICE, uint48(start + 1 days));
+        vm.stopPrank();
+
+        assertEq(mercado.listingOf(TOKEN).price, PRICE);
+    }
+
+    /// @dev Once transfers are open a holder can approve anybody. Those accounts still cannot offer the NFT.
+    function test_RevertWhen_AnAccountApprovedByTheHolderListsAfterTransfersAreOpened() public {
+        _sellAndList(alice, TOKEN, PRICE);
+        vm.prank(admin);
+        prenda.openTransfers();
+        vm.startPrank(alice);
+        prenda.approve(bob, TOKEN);
+        prenda.setApprovalForAll(carol, true);
+        vm.stopPrank();
+        address[2] memory others = [bob, carol];
+
+        for (uint256 i = 0; i < others.length; i++) {
+            _approveMercado(others[i]);
+            vm.prank(others[i]);
+            vm.expectRevert(abi.encodeWithSelector(Mercado.NotHolder.selector, TOKEN, others[i]));
+            mercado.list(TOKEN, MIN_PRICE, uint48(start + 1 days));
+        }
+
+        // Alice's offer was not replaced.
+        assertEq(mercado.listingOf(TOKEN).seller, alice);
+        assertEq(mercado.listingOf(TOKEN).price, PRICE);
+    }
+
+    /// @dev A market that was switched off accepts no new offers: no approval counts for it any more.
+    function test_RevertWhen_ListingOnAMarketThatWasDisabled() public {
+        _sell(alice, TOKEN);
+        _sell(alice, TOKEN + 1);
+        vm.startPrank(alice);
+        prenda.approve(address(mercado), TOKEN);
+        prenda.setApprovalForAll(address(mercado), true);
+        vm.stopPrank();
+        vm.prank(admin);
+        prenda.disableMarket(address(mercado));
+
+        vm.startPrank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.MarketNotApproved.selector, TOKEN));
+        mercado.list(TOKEN, PRICE, uint48(start + 1 days));
+        vm.expectRevert(abi.encodeWithSelector(Mercado.MarketNotApproved.selector, TOKEN + 1));
+        mercado.list(TOKEN + 1, PRICE, uint48(start + 1 days));
+        vm.stopPrank();
+    }
+
     function test_RevertWhen_SomeoneWhoIsNotTheHolderLists() public {
         _sell(alice, TOKEN);
         _approveMercado(alice);
@@ -249,6 +362,21 @@ contract MercadoTest is Test {
         mercado.list(TOKEN, MIN_PRICE, uint48(start + MAX_DURATION));
         vm.stopPrank();
         assertEq(mercado.listingOf(TOKEN).price, MIN_PRICE);
+    }
+
+    /// @dev The minimum price is compared to the unit, also when it is not a round number of tokens.
+    function test_RevertWhen_ThePriceIsOneUnitBelowAMinimumThatIsNotRound() public {
+        Mercado small = new Mercado(prenda, 1_500_000);
+        vm.prank(admin);
+        prenda.authorizeMarket(address(small));
+        _sell(alice, TOKEN);
+        vm.startPrank(alice);
+        prenda.setApprovalForAll(address(small), true);
+
+        vm.expectRevert(abi.encodeWithSelector(Mercado.PriceBelowMinimum.selector, uint80(1_499_999), uint80(1_500_000)));
+        small.list(TOKEN, 1_499_999, uint48(start + 1 days));
+        small.list(TOKEN, 1_500_000, uint48(start + 1 days));
+        vm.stopPrank();
     }
 
     function test_RevertWhen_TheOfferEndsInThePastOrTooFarAhead() public {
@@ -317,6 +445,45 @@ contract MercadoTest is Test {
         assertEq(mercado.listingOf(TOKEN).seller, alice);
     }
 
+    /// @dev Only whoever made an offer withdraws it: not even the new holder of the NFT.
+    function test_RevertWhen_TheNewHolderWithdrawsTheOfferOfThePreviousOne() public {
+        _sellAndList(alice, TOKEN, PRICE);
+        OpenMarketMock otherMarket = _anotherMarket();
+        vm.prank(alice);
+        prenda.setApprovalForAll(address(otherMarket), true);
+        otherMarket.move(alice, carol, TOKEN);
+
+        vm.prank(carol);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.NotSeller.selector, TOKEN, carol));
+        mercado.cancel(TOKEN);
+
+        assertEq(mercado.listingOf(TOKEN).seller, alice);
+    }
+
+    /// @dev An offer can be withdrawn after its garment was claimed and the NFT burned.
+    function test_OfferOfAClaimedGarmentCanBeWithdrawn() public {
+        _sellAndList(alice, TOKEN, PRICE);
+        vm.startPrank(alice);
+        prenda.claim(TOKEN, 0, ORDER);
+
+        mercado.cancel(TOKEN);
+        vm.stopPrank();
+
+        _assertNoListing(TOKEN);
+    }
+
+    /// @dev Withdrawing needs no approval: it also works after the seller took the approval away.
+    function test_WithdrawingAnOfferNeedsNoApproval() public {
+        _sellAndList(alice, TOKEN, PRICE);
+        vm.startPrank(alice);
+        prenda.setApprovalForAll(address(mercado), false);
+
+        mercado.cancel(TOKEN);
+        vm.stopPrank();
+
+        _assertNoListing(TOKEN);
+    }
+
     function test_RevertWhen_CancellingAnOfferThatDoesNotExist() public {
         _sell(alice, TOKEN);
 
@@ -359,9 +526,9 @@ contract MercadoTest is Test {
 
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(Prenda.NotTokenHolder.selector, TOKEN, alice));
-        prenda.claim(TOKEN, 0);
+        prenda.claim(TOKEN, 0, ORDER);
         vm.prank(bob);
-        prenda.claim(TOKEN, 0);
+        prenda.claim(TOKEN, 0, ORDER);
 
         assertEq(prenda.balanceOf(bob), 0);
     }
@@ -404,7 +571,7 @@ contract MercadoTest is Test {
 
     /// @dev At the smallest minimum price a market can be deployed with, the fee is one unit, never zero.
     function test_FeeIsNeverZeroEvenAtTheSmallestPrice() public {
-        Mercado smallest = new Mercado(prenda, 50, MAX_DURATION);
+        Mercado smallest = new Mercado(prenda, 50);
         vm.prank(admin);
         prenda.authorizeMarket(address(smallest));
         _sell(alice, TOKEN);
@@ -428,7 +595,9 @@ contract MercadoTest is Test {
         _sellAndList(alice, TOKEN, PRICE);
         _fundAndApprove(bob, PRICE);
         vm.prank(admin);
-        prenda.setTreasury(newTreasury);
+        prenda.proposeTreasury(newTreasury);
+        vm.prank(newTreasury);
+        prenda.acceptTreasury();
 
         vm.prank(bob);
         mercado.buy(TOKEN, PRICE);
@@ -524,6 +693,33 @@ contract MercadoTest is Test {
         assertEq(usdt.balanceOf(bob), 2 * uint256(PRICE));
     }
 
+    /// @dev The seller lowers the price just before the purchase lands: the buyer stated another price, so the
+    /// purchase does not go through either.
+    function test_RevertWhen_TheSellerLoweredThePrice() public {
+        _sellAndList(alice, TOKEN, 2 * PRICE);
+        _fundAndApprove(bob, 2 * uint256(PRICE));
+        vm.prank(alice);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.PriceNotAsExpected.selector, TOKEN, PRICE, 2 * uint256(PRICE)));
+        mercado.buy(TOKEN, 2 * uint256(PRICE));
+
+        assertEq(usdt.balanceOf(bob), 2 * uint256(PRICE));
+        assertEq(prenda.ownerOf(TOKEN), alice);
+    }
+
+    /// @dev The stated price is compared in full, not after cutting it to the size of the stored price.
+    function test_RevertWhen_TheStatedPriceOnlyMatchesInItsLowerBits() public {
+        _sellAndList(alice, TOKEN, PRICE);
+        _fundAndApprove(bob, PRICE);
+        uint256 lookalike = uint256(PRICE) + (uint256(1) << 80);
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.PriceNotAsExpected.selector, TOKEN, PRICE, lookalike));
+        mercado.buy(TOKEN, lookalike);
+    }
+
     function test_RevertWhen_TheNftWasSoldAnotherWay() public {
         // Alice offers it here, then sells it through another authorized market.
         _sellAndList(alice, TOKEN, PRICE);
@@ -568,7 +764,7 @@ contract MercadoTest is Test {
     function test_RevertWhen_TheGarmentWasClaimed() public {
         _sellAndList(alice, TOKEN, PRICE);
         vm.prank(alice);
-        prenda.claim(TOKEN, 0);
+        prenda.claim(TOKEN, 0, ORDER);
         _fundAndApprove(bob, PRICE);
 
         vm.prank(bob);
@@ -617,31 +813,27 @@ contract MercadoTest is Test {
         _assertNoListing(TOKEN);
     }
 
-    function test_RevertWhen_TheSellerRevokedTheApproval() public {
+    // Taking the approval back from the market withdraws, for good, every offer made under it.
+
+    function test_RevertWhen_TheSellerTookTheApprovalBack() public {
         _sellAndList(alice, TOKEN, PRICE);
         vm.prank(alice);
         prenda.setApprovalForAll(address(mercado), false);
         _fundAndApprove(bob, PRICE);
 
         vm.prank(bob);
-        vm.expectRevert(
-            abi.encodeWithSelector(IERC721Errors.ERC721InsufficientApproval.selector, address(mercado), TOKEN)
-        );
+        vm.expectRevert(abi.encodeWithSelector(Mercado.ListingNoLongerValid.selector, TOKEN));
         mercado.buy(TOKEN, PRICE);
 
-        // Nobody paid anything and the offer is still recorded.
+        // Nobody paid anything. The offer is still recorded, but it is dead.
         assertEq(usdt.balanceOf(bob), PRICE);
         assertEq(usdt.balanceOf(alice), 0);
         assertEq(usdt.balanceOf(treasury), 0);
         assertEq(mercado.listingOf(TOKEN).seller, alice);
     }
 
-    /**
-     * @dev A known limit, kept visible on purpose: an offer stays recorded until it is withdrawn, expires or the
-     * NFT changes hands. If the seller takes the approval away and gives it back later, the offer can be taken
-     * again at its old price. That is why offers expire and why the site shows the seller every open offer.
-     */
-    function test_AnOfferLeftOpenCanBeTakenAgainIfTheSellerRestoresTheApproval() public {
+    /// @dev The offer does not come back to life when the seller approves the market again.
+    function test_RevertWhen_TheSellerTookTheApprovalBackAndGaveItAgain() public {
         _sellAndList(alice, TOKEN, PRICE);
         vm.prank(alice);
         prenda.setApprovalForAll(address(mercado), false);
@@ -650,7 +842,117 @@ contract MercadoTest is Test {
         _fundAndApprove(bob, PRICE);
 
         vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.ListingNoLongerValid.selector, TOKEN));
         mercado.buy(TOKEN, PRICE);
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
+        assertEq(usdt.balanceOf(bob), PRICE);
+    }
+
+    /**
+     * @dev Alice takes garment 1 off the market by revoking the market in her wallet. Weeks later she approves the
+     * market again only to sell another garment. The approval covers all her NFTs, but the old offer of garment 1
+     * stays dead: nobody can take it at its old price before she sends anything else.
+     */
+    function test_RevertWhen_TheSellerApprovesTheMarketAgainToSellAnotherNft() public {
+        _sellAndList(alice, TOKEN, PRICE);
+        _sell(alice, TOKEN + 1);
+        vm.prank(alice);
+        prenda.setApprovalForAll(address(mercado), false);
+        vm.warp(start + 25 days);
+        _approveMercado(alice);
+        _fundAndApprove(bob, 2 * uint256(PRICE));
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.ListingNoLongerValid.selector, TOKEN));
+        mercado.buy(TOKEN, PRICE);
+
+        // The garment she did mean to sell sells normally.
+        vm.prank(alice);
+        mercado.list(TOKEN + 1, PRICE, uint48(block.timestamp + 1 days));
+        vm.prank(bob);
+        mercado.buy(TOKEN + 1, PRICE);
+        assertEq(prenda.ownerOf(TOKEN), alice);
+        assertEq(prenda.ownerOf(TOKEN + 1), bob);
+    }
+
+    /// @dev With an approval for the NFT and an approval for all, taking either one back stops the offer.
+    function test_RevertWhen_TheOfferHadTwoApprovalsAndTheSellerTookOneBack() public {
+        _sell(alice, TOKEN);
+        _sell(alice, TOKEN + 1);
+        vm.startPrank(alice);
+        prenda.approve(address(mercado), TOKEN);
+        prenda.approve(address(mercado), TOKEN + 1);
+        prenda.setApprovalForAll(address(mercado), true);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        mercado.list(TOKEN + 1, PRICE, uint48(start + MAX_DURATION));
+        // The approval for all goes; the market could still move both NFTs with their own approvals.
+        prenda.setApprovalForAll(address(mercado), false);
+        vm.stopPrank();
+        assertEq(prenda.getApproved(TOKEN), address(mercado));
+        _fundAndApprove(bob, 2 * uint256(PRICE));
+
+        vm.startPrank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.ListingNoLongerValid.selector, TOKEN));
+        mercado.buy(TOKEN, PRICE);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.ListingNoLongerValid.selector, TOKEN + 1));
+        mercado.buy(TOKEN + 1, PRICE);
+        vm.stopPrank();
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
+        assertEq(prenda.ownerOf(TOKEN + 1), alice);
+    }
+
+    /// @dev The same with an offer made under an approval for that NFT only.
+    function test_RevertWhen_TheSellerClearedTheApprovalOfTheNftAndGaveItAgain() public {
+        _sell(alice, TOKEN);
+        vm.startPrank(alice);
+        prenda.approve(address(mercado), TOKEN);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        prenda.approve(address(0), TOKEN);
+        prenda.approve(address(mercado), TOKEN);
+        vm.stopPrank();
+        _fundAndApprove(bob, PRICE);
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.ListingNoLongerValid.selector, TOKEN));
+        mercado.buy(TOKEN, PRICE);
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
+    }
+
+    /// @dev After taking the approval back, a new approval and a new offer work as on the first day.
+    function test_ANewOfferAfterTakingTheApprovalBackSells() public {
+        _sellAndList(alice, TOKEN, PRICE);
+        vm.prank(alice);
+        prenda.setApprovalForAll(address(mercado), false);
+        _approveMercado(alice);
+        vm.prank(alice);
+        mercado.list(TOKEN, 2 * PRICE, uint48(start + MAX_DURATION));
+        _fundAndApprove(bob, 2 * uint256(PRICE));
+
+        vm.prank(bob);
+        mercado.buy(TOKEN, 2 * uint256(PRICE));
+
+        assertEq(prenda.ownerOf(TOKEN), bob);
+    }
+
+    /// @dev What the seller does with other markets, or what other holders do with this one, changes nothing.
+    function test_ApprovalsTakenBackElsewhereDoNotTouchTheOffer() public {
+        _sellAndList(alice, TOKEN, PRICE);
+        OpenMarketMock otherMarket = _anotherMarket();
+        vm.startPrank(alice);
+        prenda.setApprovalForAll(address(otherMarket), true);
+        prenda.setApprovalForAll(address(otherMarket), false);
+        vm.stopPrank();
+        _approveMercado(carol);
+        vm.prank(carol);
+        prenda.setApprovalForAll(address(mercado), false);
+        _fundAndApprove(bob, PRICE);
+
+        vm.prank(bob);
+        mercado.buy(TOKEN, PRICE);
+
         assertEq(prenda.ownerOf(TOKEN), bob);
     }
 
@@ -783,6 +1085,35 @@ contract MercadoTest is Test {
         assertEq(token.balanceOf(alice), uint256(PRICE) - FEE);
         assertEq(token.balanceOf(treasury), FEE);
         assertEq(token.balanceOf(address(buyer)), PRICE);
+    }
+
+    /// @dev A payment token that answers false instead of failing must not give the NFT away.
+    function test_RevertWhen_ThePaymentTokenAnswersFalse() public {
+        FalseReturningTokenMock token = new FalseReturningTokenMock();
+        (Prenda otherPrenda, OpenMinterMock otherMinter, Mercado otherMercado) = _deployWith(IERC20(address(token)));
+        otherMinter.mint(alice, TOKEN, Prenda.StorageTerms(0, 0, 0), keccak256("data"));
+        vm.startPrank(alice);
+        otherPrenda.setApprovalForAll(address(otherMercado), true);
+        otherMercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        vm.stopPrank();
+
+        // Bob has neither the money nor an approval.
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(SafeERC20.SafeERC20FailedOperation.selector, address(token)));
+        otherMercado.buy(TOKEN, PRICE);
+        assertEq(otherPrenda.ownerOf(TOKEN), alice);
+
+        // Now he has enough for the seller's part, but not for the fee.
+        token.mint(bob, uint256(PRICE) - FEE);
+        vm.startPrank(bob);
+        token.approve(address(otherMercado), PRICE);
+        vm.expectRevert(abi.encodeWithSelector(SafeERC20.SafeERC20FailedOperation.selector, address(token)));
+        otherMercado.buy(TOKEN, PRICE);
+        vm.stopPrank();
+
+        assertEq(otherPrenda.ownerOf(TOKEN), alice);
+        assertEq(token.balanceOf(alice), 0);
+        assertEq(token.balanceOf(bob), uint256(PRICE) - FEE);
     }
 
     function _blocklistSetup() internal returns (BlocklistTokenMock token, Mercado otherMercado, Prenda otherPrenda) {

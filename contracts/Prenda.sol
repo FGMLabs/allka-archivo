@@ -31,9 +31,13 @@ interface IPrendaModule {
  * Approvals are stricter than in a plain ERC-721, so that the rules above do not depend on how any market is
  * written: only the holder can approve somebody (an approved operator cannot pass its permission on), only an
  * account that may move tokens can be approved, and a market that was disabled loses every approval it had.
+ * The contract also counts every approval a holder takes back, so that a market can drop the offers that were
+ * made under it.
  *
- * What the administration can never do: move or burn somebody else's NFT, raise a storage fee, or create again a
- * token id that was already used.
+ * What the administration can do: pause sales and transfers, add and retire modules, open transfers for good,
+ * propose a new treasury (which has to accept), name an account that can only pause, and give garments more free
+ * storage. What it can never do: move or burn somebody else's NFT, raise a storage fee, or create again a token id
+ * that was already used.
  *
  * In this contract "holder" is whoever owns an NFT and "owner" is the administration account (see {Ownable2Step}).
  */
@@ -80,11 +84,27 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
     /// @notice False while NFTs can only move through an authorized market. Once true it stays true.
     bool public transfersOpen;
 
+    /// @notice Account proposed as the next treasury. It becomes the treasury only when it accepts.
+    address public pendingTreasury;
+
+    /// @notice Account that can pause sales and transfers besides the administration. It cannot resume them.
+    address public pauser;
+
+    /// @notice Storage is free for every garment at least until this moment. It can only move forward.
+    uint48 public freeStorageForAllUntil;
+
     /// @notice Modules that are allowed to create NFTs.
     mapping(address account => bool) public isMinter;
 
     /// @notice Status of every market the administration ever registered.
     mapping(address account => MarketStatus) public marketStatus;
+
+    /**
+     * @notice How many times `holder` took back an approval it had given to `operator`, for one NFT or for all. A
+     * market records this number with every offer and refuses the offer once the number changed: taking an
+     * approval away withdraws, for good, every offer made under it, even if the approval is given again later.
+     */
+    mapping(address holder => mapping(address operator => uint64)) public approvalsRevoked;
 
     mapping(uint256 tokenId => TokenRecord) private _records;
     mapping(uint256 tokenId => bytes32) private _contentHashes;
@@ -101,22 +121,31 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
         bytes32 contentHash
     );
 
-    /// @notice `claimer` burned the NFT to receive the physical garment and paid `storageFee`.
-    event Claimed(uint256 indexed tokenId, address indexed claimer, uint256 storageFee);
+    /**
+     * @notice `claimer` burned the NFT to receive the physical garment and paid `storageFee`. `orderRef` is the
+     * reference of the order the claimer prepared beforehand, or zero.
+     */
+    event Claimed(uint256 indexed tokenId, address indexed claimer, bytes32 indexed orderRef, uint256 storageFee);
 
     /// @notice The administration gave a garment more free storage.
     event FreeStorageExtended(uint256 indexed tokenId, uint48 previousFreeUntil, uint48 newFreeUntil);
+
+    /// @notice The administration gave every garment free storage at least until `newFreeUntil`.
+    event FreeStorageForAllExtended(uint48 previousFreeUntil, uint48 newFreeUntil);
 
     event MinterSet(address indexed minter, bool allowed);
     event MarketAuthorized(address indexed market);
     event MarketDisabled(address indexed market);
     event TransfersOpened();
+    event TreasuryProposed(address indexed proposedTreasury);
     event TreasuryChanged(address indexed previousTreasury, address indexed newTreasury);
+    event PauserChanged(address indexed previousPauser, address indexed newPauser);
     event BaseURIChanged(string newBaseURI);
 
     error NotAContract(address account);
     error NotAModule(address account);
     error InvalidTreasury(address account);
+    error NotPendingTreasury(address caller);
     error NotMinter(address caller);
     error TokenIdAlreadyUsed(uint256 tokenId);
     error EmptyContentHash();
@@ -129,6 +158,7 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
     error MarketNotAuthorized(address market);
     error TransfersAlreadyOpen();
     error FreeStorageNotExtended(uint256 tokenId, uint48 currentFreeUntil, uint48 requestedFreeUntil);
+    error FreeStorageForAllNotExtended(uint48 currentFreeUntil, uint48 requestedFreeUntil);
     error OwnershipCannotBeRenounced();
 
     /**
@@ -166,8 +196,11 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
      * @param tokenId The NFT of the garment.
      * @param maxFeeAccepted The most the caller accepts to pay. The claim fails if the fee is higher, for example
      * because a new instalment was added between signing and confirmation.
+     * @param orderRef Reference of the order the caller prepared beforehand with the shipping details, or zero.
+     * The contract only publishes it in {Claimed}, so that the burn names its order in the same transaction. It
+     * is public for ever: it must be a meaningless identifier, never personal data or something derived from it.
      */
-    function claim(uint256 tokenId, uint256 maxFeeAccepted) external {
+    function claim(uint256 tokenId, uint256 maxFeeAccepted, bytes32 orderRef) external {
         address claimer = _msgSender();
         if (_requireOwned(tokenId) != claimer) revert NotTokenHolder(tokenId, claimer);
 
@@ -175,7 +208,7 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
         if (fee > maxFeeAccepted) revert StorageFeeAboveAccepted(tokenId, fee, maxFeeAccepted);
 
         _burn(tokenId);
-        emit Claimed(tokenId, claimer, fee);
+        emit Claimed(tokenId, claimer, orderRef, fee);
 
         if (fee != 0) {
             paymentToken.safeTransferFrom(claimer, treasury, fee);
@@ -262,22 +295,50 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
         emit TransfersOpened();
     }
 
-    /// @notice Changes the account that receives the money.
-    function setTreasury(address newTreasury) external onlyOwner {
-        _setTreasury(newTreasury);
+    /**
+     * @notice Proposes a new account to receive the money. Nothing changes until that account accepts with
+     * {acceptTreasury}, so a mistyped address can never become the treasury. Proposing the zero address withdraws
+     * a proposal.
+     */
+    function proposeTreasury(address newTreasury) external onlyOwner {
+        if (newTreasury == address(this)) revert InvalidTreasury(newTreasury);
+        pendingTreasury = newTreasury;
+        emit TreasuryProposed(newTreasury);
+    }
+
+    /// @notice Becomes the treasury. Only the account the administration proposed can call it.
+    function acceptTreasury() external {
+        address caller = _msgSender();
+        if (caller != pendingTreasury) revert NotPendingTreasury(caller);
+        delete pendingTreasury;
+        _setTreasury(caller);
     }
 
     /**
-     * @notice Gives a garment more free storage. This is the only way to change the storage of a garment already
-     * sold, and it can only lower what its holder pays: the date can move forward, never back.
+     * @notice Gives a garment more free storage. Together with {extendFreeStorageForAll}, this is the only way to
+     * change the storage of a garment already sold, and it can only lower what its holder pays: the date can move
+     * forward, never back.
      * @param newFreeUntil New end of the free storage, as a Unix timestamp. Later than the current one.
      */
     function extendFreeStorage(uint256 tokenId, uint48 newFreeUntil) external onlyOwner {
         _requireOwned(tokenId);
-        uint48 currentFreeUntil = _records[tokenId].freeUntil;
+        uint48 currentFreeUntil = _freeUntil(_records[tokenId]);
         if (newFreeUntil <= currentFreeUntil) revert FreeStorageNotExtended(tokenId, currentFreeUntil, newFreeUntil);
         _records[tokenId].freeUntil = newFreeUntil;
         emit FreeStorageExtended(tokenId, currentFreeUntil, newFreeUntil);
+    }
+
+    /**
+     * @notice Gives every garment, sold or still to be sold, free storage at least until `newFreeUntil`. It is the
+     * way out if the payment token stops working for this contract: a claim that owes no fee does not touch the
+     * token. It can only lower what holders pay: the date can move forward, never back.
+     * @param newFreeUntil New end of the free storage for all, as a Unix timestamp. Later than the current one.
+     */
+    function extendFreeStorageForAll(uint48 newFreeUntil) external onlyOwner {
+        uint48 currentFreeUntil = freeStorageForAllUntil;
+        if (newFreeUntil <= currentFreeUntil) revert FreeStorageForAllNotExtended(currentFreeUntil, newFreeUntil);
+        freeStorageForAllUntil = newFreeUntil;
+        emit FreeStorageForAllExtended(currentFreeUntil, newFreeUntil);
     }
 
     /**
@@ -288,12 +349,23 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
         _setBaseURI(newBaseURI);
     }
 
-    /// @notice Stops sales and transfers in an emergency. Claims are never stopped.
-    function pause() external onlyOwner {
+    /// @notice Names the account that can pause besides the administration. The zero address leaves nobody.
+    function setPauser(address newPauser) external onlyOwner {
+        emit PauserChanged(pauser, newPauser);
+        pauser = newPauser;
+    }
+
+    /**
+     * @notice Stops sales and transfers in an emergency. Claims are never stopped. The administration and the
+     * pauser can call it.
+     */
+    function pause() external {
+        address caller = _msgSender();
+        if (caller != owner() && caller != pauser) revert OwnableUnauthorizedAccount(caller);
         _pause();
     }
 
-    /// @notice Resumes sales and transfers.
+    /// @notice Resumes sales and transfers. Only the administration can.
     function unpause() external onlyOwner {
         _unpause();
     }
@@ -314,14 +386,16 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
     }
 
     /**
-     * @notice Storage rules of a garment. Storage is free until `freeUntil`; after that `feePerPeriod` is added
-     * for every full {STORAGE_PERIOD}, up to `maxFee`. All zero for a token id that was never used.
+     * @notice Storage rules of a garment. Storage is free until `freeUntil`, which is the date of the garment or
+     * the date given to all garments, whichever is later; after that `feePerPeriod` is added for every full
+     * {STORAGE_PERIOD}, up to `maxFee`. All zero for a token id that was never used.
      */
     function storageTermsOf(
         uint256 tokenId
     ) external view returns (uint48 freeUntil, uint80 feePerPeriod, uint80 maxFee) {
-        TokenRecord storage record = _records[tokenId];
-        return (record.freeUntil, record.feePerPeriod, record.maxFee);
+        TokenRecord memory record = _records[tokenId];
+        if (!record.used) return (0, 0, 0);
+        return (_freeUntil(record), record.feePerPeriod, record.maxFee);
     }
 
     /// @notice Fingerprint of the data of the NFT, fixed when it was created. Zero if the id was never used.
@@ -347,14 +421,30 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
         return _mayMoveTokens(operator) && super.isApprovedForAll(holder, operator);
     }
 
+    /**
+     * @notice The account approved to move this NFT, or zero if there is none. As in {isApprovedForAll}, an
+     * approval only counts while its account may move tokens.
+     */
+    function getApproved(uint256 tokenId) public view override returns (address) {
+        address approved = super.getApproved(tokenId);
+        return _mayMoveTokens(approved) ? approved : address(0);
+    }
+
     // ------------------------------------------------------------------------------------------------------------
     // Internal
     // ------------------------------------------------------------------------------------------------------------
 
-    /// @dev Zero until `freeUntil`; then one instalment per full period, never above the ceiling.
+    /// @dev End of the free storage of a garment: its own date or the date given to all, whichever is later.
+    function _freeUntil(TokenRecord memory record) private view returns (uint48) {
+        uint48 forAll = freeStorageForAllUntil;
+        return record.freeUntil > forAll ? record.freeUntil : forAll;
+    }
+
+    /// @dev Zero until the end of the free storage; then one instalment per full period, never above the ceiling.
     function _storageFee(TokenRecord memory record) private view returns (uint256) {
-        if (block.timestamp <= record.freeUntil) return 0;
-        uint256 fee = ((block.timestamp - record.freeUntil) / STORAGE_PERIOD) * record.feePerPeriod;
+        uint256 freeUntil = _freeUntil(record);
+        if (block.timestamp <= freeUntil) return 0;
+        uint256 fee = ((block.timestamp - freeUntil) / STORAGE_PERIOD) * record.feePerPeriod;
         return fee < record.maxFee ? fee : record.maxFee;
     }
 
@@ -393,17 +483,26 @@ contract Prenda is ERC721, Ownable2Step, Pausable {
 
     /**
      * @dev Only the holder sets or clears the approval of an NFT, and only an account that may move tokens can be
-     * approved. `auth` is zero only when the library clears the approval during a transfer or a burn.
+     * approved. `auth` is zero only when the library clears the approval during a transfer or a burn; those are
+     * not counted as approvals taken back, because the NFT itself is leaving the holder.
      */
     function _approve(address to, uint256 tokenId, address auth, bool emitEvent) internal override {
-        if (auth != address(0) && auth != _requireOwned(tokenId)) revert ERC721InvalidApprover(auth);
+        if (auth != address(0)) {
+            if (auth != _requireOwned(tokenId)) revert ERC721InvalidApprover(auth);
+            address previous = _getApproved(tokenId);
+            if (previous != address(0) && previous != to) approvalsRevoked[auth][previous] += 1;
+        }
         if (to != address(0) && !_mayMoveTokens(to)) revert ApprovalNotAllowed(to);
         super._approve(to, tokenId, auth, emitEvent);
     }
 
     /// @dev Only an account that may move tokens can be approved. Revoking an approval is always possible.
     function _setApprovalForAll(address holder, address operator, bool approved) internal override {
-        if (approved && !_mayMoveTokens(operator)) revert ApprovalNotAllowed(operator);
+        if (approved) {
+            if (!_mayMoveTokens(operator)) revert ApprovalNotAllowed(operator);
+        } else if (super.isApprovedForAll(holder, operator)) {
+            approvalsRevoked[holder][operator] += 1;
+        }
         super._setApprovalForAll(holder, operator, approved);
     }
 

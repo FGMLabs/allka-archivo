@@ -15,6 +15,10 @@ import {Prenda} from "./Prenda.sol";
  * {Prenda}; this contract can only move an NFT whose holder approved it, and it only does so when a buyer pays the
  * price the holder asked.
  *
+ * An offer stops being valid when its time runs out, when the NFT changes hands or when the seller takes an
+ * approval back from this contract. An offer that stopped being valid never comes back: the seller has to make a
+ * new one.
+ *
  * Nobody administers this contract. The fee is a constant, so it can never be raised. The treasury, the payment
  * token and the pause are those of {Prenda}.
  */
@@ -28,18 +32,25 @@ contract Mercado {
      * @param transferCount How many times the NFT had changed hands when the offer was made. If the NFT changes
      * hands again, the offer stops being valid, even if the NFT comes back to the seller.
      * @param price Price in payment token units, fee included.
+     * @param approvalsRevoked How many times the seller had taken an approval back from this contract when the
+     * offer was made. If the seller takes one back again, the offer stops being valid, even if the approval is
+     * given again later.
      */
     struct Listing {
         address seller;
         uint48 expiresAt;
         uint32 transferCount;
         uint80 price;
+        uint64 approvalsRevoked;
     }
 
     /// @notice Share of every sale that goes to the treasury, in hundredths of a percent: 200 is 2%.
     uint256 public constant FEE_BPS = 200;
 
     uint256 private constant BPS_DENOMINATOR = 10_000;
+
+    /// @notice Longest time an offer can stay open. Old offers must not stay around for ever.
+    uint256 public constant MAX_LISTING_DURATION = 30 days;
 
     /// @notice The NFT contract. Its treasury receives the fee.
     Prenda public immutable prenda;
@@ -50,9 +61,6 @@ contract Mercado {
     /// @notice Lowest price an offer can have.
     uint80 public immutable minPrice;
 
-    /// @notice Longest time an offer can stay open. Old offers must not stay around for ever.
-    uint48 public immutable maxListingDuration;
-
     mapping(uint256 tokenId => Listing) private _listings;
 
     event Listed(uint256 indexed tokenId, address indexed seller, uint80 price, uint48 expiresAt);
@@ -62,7 +70,6 @@ contract Mercado {
     event Sold(uint256 indexed tokenId, address indexed seller, address indexed buyer, uint80 price, uint256 fee);
 
     error MinimumPriceTooLow(uint80 minPrice);
-    error ZeroListingDuration();
     error NotHolder(uint256 tokenId, address caller);
     error MarketNotApproved(uint256 tokenId);
     error PriceBelowMinimum(uint80 price, uint80 minimumAllowed);
@@ -76,15 +83,12 @@ contract Mercado {
     /**
      * @param prenda_ The NFT contract.
      * @param minPrice_ Lowest price an offer can have. High enough for the fee never to round down to zero.
-     * @param maxListingDuration_ Longest time an offer can stay open.
      */
-    constructor(Prenda prenda_, uint80 minPrice_, uint48 maxListingDuration_) {
+    constructor(Prenda prenda_, uint80 minPrice_) {
         if (uint256(minPrice_) * FEE_BPS < BPS_DENOMINATOR) revert MinimumPriceTooLow(minPrice_);
-        if (maxListingDuration_ == 0) revert ZeroListingDuration();
         prenda = prenda_;
         paymentToken = prenda_.paymentToken();
         minPrice = minPrice_;
-        maxListingDuration = maxListingDuration_;
     }
 
     /**
@@ -93,7 +97,7 @@ contract Mercado {
      * @param tokenId The NFT.
      * @param price What the buyer pays, in payment token units. The seller receives it minus the 2% fee.
      * @param expiresAt Last moment at which the offer can be taken. In the future, no later than
-     * {maxListingDuration} from now.
+     * {MAX_LISTING_DURATION} from now.
      */
     function list(uint256 tokenId, uint80 price, uint48 expiresAt) external {
         address seller = msg.sender;
@@ -102,14 +106,15 @@ contract Mercado {
             revert MarketNotApproved(tokenId);
         }
         if (price < minPrice) revert PriceBelowMinimum(price, minPrice);
-        uint256 latestAllowed = block.timestamp + maxListingDuration;
+        uint256 latestAllowed = block.timestamp + MAX_LISTING_DURATION;
         if (expiresAt <= block.timestamp || expiresAt > latestAllowed) revert InvalidExpiry(expiresAt, latestAllowed);
 
         _listings[tokenId] = Listing({
             seller: seller,
             expiresAt: expiresAt,
             transferCount: prenda.transferCountOf(tokenId),
-            price: price
+            price: price,
+            approvalsRevoked: prenda.approvalsRevoked(seller, address(this))
         });
         emit Listed(tokenId, seller, price, expiresAt);
     }
@@ -135,9 +140,12 @@ contract Mercado {
         if (listing.seller == address(0)) revert NotListed(tokenId);
         if (block.timestamp > listing.expiresAt) revert ListingExpired(tokenId, listing.expiresAt);
         if (listing.price != expectedPrice) revert PriceNotAsExpected(tokenId, listing.price, expectedPrice);
-        // The offer is only good if the NFT is still in the hands it was in when the offer was made.
+        // The offer is only good if the NFT is still in the hands it was in when the offer was made, and the
+        // seller has not taken an approval back from this contract since.
         if (
-            prenda.transferCountOf(tokenId) != listing.transferCount || prenda.ownerOf(tokenId) != listing.seller
+            prenda.transferCountOf(tokenId) != listing.transferCount ||
+            prenda.ownerOf(tokenId) != listing.seller ||
+            prenda.approvalsRevoked(listing.seller, address(this)) != listing.approvalsRevoked
         ) revert ListingNoLongerValid(tokenId);
 
         address buyer = msg.sender;

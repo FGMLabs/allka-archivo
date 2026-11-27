@@ -6,16 +6,19 @@ import {Hashes} from "@openzeppelin/contracts/utils/cryptography/Hashes.sol";
 import {Mercado} from "./Mercado.sol";
 import {Prenda} from "./Prenda.sol";
 import {Venta} from "./Venta.sol";
+import {OpenMarketMock} from "./mocks/OpenMarketMock.sol";
 import {TestUSDT0} from "./mocks/TestUSDT0.sol";
 
 /**
- * @notice Random sequences over the three contracts together: drops are created and cancelled, garments are bought
- * in the early window and after it, NFTs are offered, bought and re-offered on the market, garments are claimed,
- * and in between the clock moves, sales are paused and the treasury changes.
+ * @notice Random sequences over the three contracts together: drops are created and closed, garments that were not
+ * sold go into new drops, garments are bought in the early window and after it, NFTs are offered, bought and
+ * re-offered on the market, they also change hands through a second market, approvals are given and taken back,
+ * garments are claimed, and in between the clock moves, sales are paused and the treasury changes.
  *
  * Before every operation the handler works out, from its own books, whether the operation should succeed. A result
  * that does not match is written down as a violation. The books also follow every unit of money: what each wallet
- * must hold and what the treasury must have received.
+ * must hold and what the treasury must have received. The books never read the contracts to decide: approvals, the
+ * pause and every date are kept on the side and compared with the contracts afterwards.
  */
 contract ArchivoHandler is Test {
     uint48 public constant DELAY = 1 hours;
@@ -29,10 +32,12 @@ contract ArchivoHandler is Test {
         uint48 earlyStart;
         uint48 publicStart;
         bool hasEarlyWindow;
-        bool cancelled;
+        bool closed;
         uint32 freePeriod;
         uint80 feePerPeriod;
         uint80 maxFee;
+        uint256 firstId;
+        uint256 size;
     }
 
     struct ItemBook {
@@ -43,6 +48,7 @@ contract ArchivoHandler is Test {
         address holder;
         uint32 moves;
         uint48 freeUntil;
+        bool approvedForMarket;
     }
 
     struct ListingBook {
@@ -51,11 +57,14 @@ contract ArchivoHandler is Test {
         uint80 price;
         uint48 expiresAt;
         uint32 moves;
+        uint64 revoked;
     }
 
     Prenda public immutable prenda;
     Venta public immutable venta;
     Mercado public immutable mercado;
+    /// @dev A second authorized market, through which NFTs change hands behind the back of the first.
+    OpenMarketMock public immutable otherMarket;
     TestUSDT0 public immutable usdt;
     address public immutable admin;
     address public immutable operator;
@@ -73,13 +82,19 @@ contract ArchivoHandler is Test {
     mapping(uint256 tokenId => ListingBook) internal _listings;
     mapping(uint32 dropId => mapping(address account => bool)) internal _boughtEarly;
 
-    /// @dev Garments of the last drop, garments ever sold and garments ever offered on the market. Most operations
-    /// aim at these so that the interesting paths are taken often; the rest of the time they aim anywhere.
-    uint256 internal _lastDropFirstId;
-    uint256 internal _lastDropSize;
+    /// @dev Whether each wallet approves the market for all its NFTs, and how many approvals it took back from it.
+    mapping(address account => bool) public approvesMarket;
+    mapping(address account => uint64) public revokedBook;
+    bool public pausedBook;
+
+    /// @dev The last drop, the last drop that was closed, garments ever sold and garments ever offered on the
+    /// market. Most operations aim at these so that the interesting paths are taken often; the rest of the time
+    /// they aim anywhere.
+    uint32 internal _lastClosedDrop;
     uint256[] internal _soldIds;
     uint256[] internal _offeredIds;
     mapping(uint256 tokenId => bool) internal _wasOffered;
+    uint256 internal _lastOffered;
 
     /// @dev What each wallet must hold: money from its sales plus money minted for purchases that did not happen.
     mapping(address account => uint256) public expectedBalance;
@@ -91,16 +106,25 @@ contract ArchivoHandler is Test {
     uint256 public earlyPurchases;
     uint256 public publicPurchases;
     uint256 public refusedPurchases;
+    uint256 public purchasesRefusedForTheDrop;
+    uint256 public offersMade;
     uint256 public resales;
     uint256 public refusedResales;
+    uint256 public staleOffersRefused;
+    uint256 public revokedOffersRefused;
     uint256 public paidClaims;
     uint256 public freeClaims;
-    uint256 public cancelledDrops;
+    uint256 public dropsClosedBeforeOpening;
+    uint256 public dropsClosedWhileOpen;
+    uint256 public garmentsRelisted;
+    uint256 public refusedRelistings;
+    uint256 public movesOutside;
 
     constructor(
         Prenda prenda_,
         Venta venta_,
         Mercado mercado_,
+        OpenMarketMock otherMarket_,
         TestUSDT0 usdt_,
         address admin_,
         address operator_,
@@ -109,6 +133,7 @@ contract ArchivoHandler is Test {
         prenda = prenda_;
         venta = venta_;
         mercado = mercado_;
+        otherMarket = otherMarket_;
         usdt = usdt_;
         admin = admin_;
         operator = operator_;
@@ -144,6 +169,11 @@ contract ArchivoHandler is Test {
         return violations.length;
     }
 
+    /// @dev The fingerprint the handler gives a garment: it changes with every drop the garment goes into.
+    function fingerprint(uint256 tokenId, uint32 dropId) public pure returns (bytes32) {
+        return keccak256(abi.encode(tokenId, dropId));
+    }
+
     function _actor(uint256 seed) internal view returns (address) {
         return actors[seed % actors.length];
     }
@@ -153,10 +183,10 @@ contract ArchivoHandler is Test {
         return (1 + (seed % itemCount), true);
     }
 
-    /// @dev Three times out of four a garment of the last drop, which is the one most likely to be on sale.
-    function _pickForFirstSale(uint256 seed) internal view returns (uint256 tokenId, bool ok) {
+    /// @dev Three times out of four a garment of `dropId`, when that drop exists; otherwise any garment.
+    function _pickInDrop(uint32 dropId, uint256 seed) internal view returns (uint256 tokenId, bool ok) {
         if (itemCount == 0) return (0, false);
-        if (seed % 4 != 0) return (_lastDropFirstId + ((seed >> 8) % _lastDropSize), true);
+        if (dropId != 0 && seed % 4 != 0) return (_drops[dropId].firstId + ((seed >> 8) % _drops[dropId].size), true);
         return (1 + ((seed >> 8) % itemCount), true);
     }
 
@@ -164,6 +194,13 @@ contract ArchivoHandler is Test {
     function _pickFrom(uint256[] storage preferred, uint256 seed) internal view returns (uint256 tokenId, bool ok) {
         if (preferred.length != 0 && seed % 8 != 0) return (preferred[(seed >> 8) % preferred.length], true);
         return _pickItem(seed >> 8);
+    }
+
+    /// @dev Half of the time the garment that was offered last, which is the one most likely to have an offer
+    /// that still stands; otherwise as {_pickFrom} with the garments ever offered.
+    function _pickOffered(uint256 seed) internal view returns (uint256 tokenId, bool ok) {
+        if (_lastOffered != 0 && seed % 2 == 0) return (_lastOffered, true);
+        return _pickFrom(_offeredIds, seed >> 1);
     }
 
     function _leaf(address account) internal pure returns (bytes32) {
@@ -186,8 +223,9 @@ contract ArchivoHandler is Test {
         }
     }
 
+    /// @dev From the books: the holder approved the market for all its NFTs or for this one.
     function _marketApprovedBy(address holder, uint256 tokenId) internal view returns (bool) {
-        return prenda.isApprovedForAll(holder, address(mercado)) || prenda.getApproved(tokenId) == address(mercado);
+        return approvesMarket[holder] || _items[tokenId].approvedForMarket;
     }
 
     /// @dev The storage rule, from the books: free until `freeUntil`, then one instalment per full 30 days.
@@ -223,7 +261,7 @@ contract ArchivoHandler is Test {
             items[i] = Venta.NewItem({
                 tokenId: tokenId,
                 price: price + uint80(i),
-                contentHash: keccak256(abi.encode(tokenId))
+                contentHash: fingerprint(tokenId, dropCount + 1)
             });
         }
 
@@ -243,60 +281,116 @@ contract ArchivoHandler is Test {
                 earlyStart: earlyStart,
                 publicStart: publicStart,
                 hasEarlyWindow: withEarlyWindow,
-                cancelled: false,
+                closed: false,
                 freePeriod: freePeriod,
                 feePerPeriod: feePerPeriod,
-                maxFee: maxFee
+                maxFee: maxFee,
+                firstId: itemCount + 1,
+                size: count
             });
             for (uint256 i = 0; i < count; i++) {
                 _items[itemCount + 1 + i].dropId = dropId;
                 _items[itemCount + 1 + i].price = price + uint80(i);
             }
-            _lastDropFirstId = itemCount + 1;
-            _lastDropSize = count;
             itemCount += count;
         } catch {
             violations.push("a valid drop could not be created");
         }
     }
 
-    function cancelDrop(uint256 dropSeed, bool byAdmin) external {
+    /// @dev A drop can be closed at any moment, by the operator or by the administration, but only once.
+    function closeDrop(uint256 dropSeed, bool byAdmin) external {
         if (dropCount == 0) return;
-        uint32 dropId = dropSeed % 2 == 0 ? dropCount : uint32(1 + ((dropSeed >> 8) % dropCount));
+        uint32 dropId = dropSeed % 4 == 0 ? dropCount : uint32(1 + ((dropSeed >> 8) % dropCount));
         DropBook memory drop = _drops[dropId];
-        bool expected = !drop.cancelled && block.timestamp < drop.earlyStart;
+        bool expected = !drop.closed;
 
         vm.prank(byAdmin ? admin : operator);
-        try venta.cancelDrop(dropId) {
-            if (!expected) violations.push("a drop that was open or already cancelled got cancelled");
-            _drops[dropId].cancelled = true;
-            cancelledDrops += 1;
+        try venta.closeDrop(dropId) {
+            if (!expected) violations.push("a drop was closed twice");
+            _drops[dropId].closed = true;
+            _lastClosedDrop = dropId;
+            if (block.timestamp < drop.earlyStart) dropsClosedBeforeOpening += 1;
+            else dropsClosedWhileOpen += 1;
         } catch {
-            if (expected) violations.push("a drop that had not opened could not be cancelled");
+            if (expected) violations.push("a drop could not be closed");
         }
     }
 
-    function buyFirstSale(uint256 tokenSeed, uint256 buyerSeed, uint256 priceTrick) external {
-        (uint256 tokenId, bool ok) = _pickForFirstSale(tokenSeed);
+    /**
+     * @dev Tries to put a number that was already in a drop into a new drop. It must work only for a garment that
+     * was not sold and whose drop was closed; then the garment takes the price, the dates and the fingerprint of
+     * the new drop.
+     */
+    function createDropWithAUsedNumber(uint256 tokenSeed, uint80 price, bool withEarlyWindow) external {
+        (uint256 tokenId, bool ok) = _pickInDrop(_lastClosedDrop, tokenSeed);
+        if (!ok) return;
+        ItemBook memory item = _items[tokenId];
+        price = uint80(bound(price, MIN_PRICE, MAX_PRICE));
+        bool expected = !item.sold && _drops[item.dropId].closed;
+
+        uint48 earlyStart = uint48(block.timestamp + DELAY);
+        uint48 publicStart = withEarlyWindow ? earlyStart + EARLY_WINDOW : earlyStart;
+        Venta.NewItem[] memory items = new Venta.NewItem[](1);
+        items[0] = Venta.NewItem({tokenId: tokenId, price: price, contentHash: fingerprint(tokenId, dropCount + 1)});
+
+        vm.prank(operator);
+        try
+            venta.createDrop(
+                earlyStart,
+                publicStart,
+                withEarlyWindow ? snapshotRoot : bytes32(0),
+                Prenda.StorageTerms({freePeriod: 0, feePerPeriod: 0, maxFee: 0}),
+                items
+            )
+        returns (uint32 dropId) {
+            if (!expected) violations.push("a number that was sold, or is in an open drop, went into a new drop");
+            dropCount += 1;
+            if (dropId != dropCount) violations.push("drop ids do not count up");
+            _drops[dropId] = DropBook({
+                earlyStart: earlyStart,
+                publicStart: publicStart,
+                hasEarlyWindow: withEarlyWindow,
+                closed: false,
+                freePeriod: 0,
+                feePerPeriod: 0,
+                maxFee: 0,
+                firstId: tokenId,
+                size: 1
+            });
+            _items[tokenId].dropId = dropId;
+            _items[tokenId].price = price;
+            garmentsRelisted += 1;
+        } catch {
+            if (expected) violations.push("an unsold garment of a closed drop could not go into a new drop");
+            refusedRelistings += 1;
+        }
+    }
+
+    function buyFirstSale(uint256 tokenSeed, uint256 buyerSeed, uint256 trick) external {
+        (uint256 tokenId, bool ok) = _pickInDrop(dropCount, tokenSeed);
         if (!ok) return;
         ItemBook memory item = _items[tokenId];
         DropBook memory drop = _drops[item.dropId];
         address buyer = _actor(buyerSeed);
 
-        // One time in eight the buyer states a price that is not the price of the garment.
-        uint256 statedPrice = priceTrick % 8 == 0 ? uint256(item.price) + 1 + (priceTrick % 5) : item.price;
+        // One time in eight the buyer states a price that is not the price of the garment, and one time in eight
+        // a drop picked at random, which is seldom the drop of the garment.
+        uint256 statedPrice = trick % 8 == 0 ? uint256(item.price) + 1 + (trick % 5) : item.price;
+        uint32 statedDrop = (trick >> 8) % 8 == 0 ? uint32((trick >> 16) % (uint256(dropCount) + 2)) : item.dropId;
         bool early = block.timestamp < drop.publicStart;
-        bool expected = !drop.cancelled &&
+        bool expectedButForTheDrop = !drop.closed &&
             !item.sold &&
             block.timestamp >= drop.earlyStart &&
             statedPrice == item.price &&
             (!early || (_inSnapshot(buyer) && !_boughtEarly[item.dropId][buyer])) &&
-            !prenda.paused();
+            !pausedBook;
+        bool expected = expectedButForTheDrop && statedDrop == item.dropId;
 
         vm.startPrank(buyer);
         usdt.mint(statedPrice);
         usdt.approve(address(venta), statedPrice);
-        try venta.buy(tokenId, statedPrice, _proofOf(buyer)) {
+        try venta.buy(tokenId, statedDrop, statedPrice, _proofOf(buyer)) {
             if (!expected) violations.push("a first sale that should have failed went through");
             _items[tokenId].sold = true;
             _items[tokenId].holder = buyer;
@@ -312,6 +406,7 @@ contract ArchivoHandler is Test {
             }
         } catch {
             if (expected) violations.push("a valid first sale failed");
+            if (expectedButForTheDrop && !expected) purchasesRefusedForTheDrop += 1;
             expectedBalance[buyer] += statedPrice;
             refusedPurchases += 1;
         }
@@ -322,8 +417,39 @@ contract ArchivoHandler is Test {
     // ----------------------------------------------------------------------------------------------------- market
 
     function approveMarket(uint256 actorSeed, bool approved) external {
-        vm.prank(_actor(actorSeed));
+        address actor = _actor(actorSeed);
+        vm.prank(actor);
         prenda.setApprovalForAll(address(mercado), approved);
+        if (!approved && approvesMarket[actor]) revokedBook[actor] += 1;
+        approvesMarket[actor] = approved;
+    }
+
+    /// @dev The holder approves the market for one NFT only, or clears that approval.
+    function approveMarketForOneNft(uint256 tokenSeed, bool approved) external {
+        (uint256 tokenId, bool ok) = _pickFrom(_soldIds, tokenSeed);
+        if (!ok) return;
+        ItemBook memory item = _items[tokenId];
+        if (!item.sold || item.burned) return;
+
+        vm.prank(item.holder);
+        prenda.approve(approved ? address(mercado) : address(0), tokenId);
+        if (!approved && item.approvedForMarket) revokedBook[item.holder] += 1;
+        _items[tokenId].approvedForMarket = approved;
+    }
+
+    /// @dev A seller with an open offer takes the approval for all back from the market and gives it again right
+    /// away. The offer must be dead from then on.
+    function takeApprovalBackAndGiveItAgain(uint256 tokenSeed) external {
+        (uint256 tokenId, bool ok) = _pickOffered(tokenSeed);
+        if (!ok) return;
+        ListingBook memory listing = _listings[tokenId];
+        if (!listing.exists || !approvesMarket[listing.seller]) return;
+
+        vm.startPrank(listing.seller);
+        prenda.setApprovalForAll(address(mercado), false);
+        prenda.setApprovalForAll(address(mercado), true);
+        vm.stopPrank();
+        revokedBook[listing.seller] += 1;
     }
 
     function list(uint256 tokenSeed, uint80 price, uint48 duration, bool byHolder, uint256 otherSeed) external {
@@ -337,6 +463,7 @@ contract ArchivoHandler is Test {
         if (otherSeed % 2 == 0) {
             vm.prank(caller);
             prenda.setApprovalForAll(address(mercado), true);
+            approvesMarket[caller] = true;
         }
         bool expected = alive && caller == item.holder && _marketApprovedBy(caller, tokenId);
 
@@ -348,19 +475,22 @@ contract ArchivoHandler is Test {
                 seller: caller,
                 price: price,
                 expiresAt: expiresAt,
-                moves: item.moves
+                moves: item.moves,
+                revoked: revokedBook[caller]
             });
             if (!_wasOffered[tokenId]) {
                 _wasOffered[tokenId] = true;
                 _offeredIds.push(tokenId);
             }
+            _lastOffered = tokenId;
+            offersMade += 1;
         } catch {
             if (expected) violations.push("a valid offer could not be made");
         }
     }
 
     function cancelListing(uint256 tokenSeed, bool bySeller, uint256 otherSeed) external {
-        (uint256 tokenId, bool ok) = _pickFrom(_offeredIds, tokenSeed);
+        (uint256 tokenId, bool ok) = _pickOffered(tokenSeed);
         if (!ok) return;
         ListingBook memory listing = _listings[tokenId];
         address caller = bySeller && listing.exists ? listing.seller : _actor(otherSeed);
@@ -376,7 +506,7 @@ contract ArchivoHandler is Test {
     }
 
     function buyOnMarket(uint256 tokenSeed, uint256 buyerSeed, uint256 priceTrick) external {
-        (uint256 tokenId, bool ok) = _pickFrom(_offeredIds, tokenSeed);
+        (uint256 tokenId, bool ok) = _pickOffered(tokenSeed);
         if (!ok) return;
         ItemBook memory item = _items[tokenId];
         ListingBook memory listing = _listings[tokenId];
@@ -386,15 +516,18 @@ contract ArchivoHandler is Test {
             ? uint256(MIN_PRICE) + (priceTrick % 7)
             : listing.price;
 
-        bool expected = listing.exists &&
+        // Everything about the offer itself, the NFT and the pause...
+        bool offerStands = listing.exists &&
             block.timestamp <= listing.expiresAt &&
             statedPrice == listing.price &&
             item.sold &&
             !item.burned &&
-            item.holder == listing.seller &&
-            item.moves == listing.moves &&
-            _marketApprovedBy(listing.seller, tokenId) &&
-            !prenda.paused();
+            !pausedBook;
+        // ...the NFT is still in the hands it was in...
+        bool sameHands = item.holder == listing.seller && item.moves == listing.moves;
+        // ...and the seller did not take an approval back since.
+        bool notRevoked = revokedBook[listing.seller] == listing.revoked;
+        bool expected = offerStands && sameHands && notRevoked && _marketApprovedBy(listing.seller, tokenId);
 
         vm.startPrank(buyer);
         usdt.mint(statedPrice);
@@ -406,15 +539,44 @@ contract ArchivoHandler is Test {
             treasuryIncome += fee;
             _items[tokenId].holder = buyer;
             _items[tokenId].moves += 1;
+            _items[tokenId].approvedForMarket = false;
             delete _listings[tokenId];
             resales += 1;
         } catch {
             if (expected) violations.push("a valid resale failed");
+            if (offerStands && !sameHands) staleOffersRefused += 1;
+            if (offerStands && sameHands && !notRevoked && _marketApprovedBy(listing.seller, tokenId)) {
+                revokedOffersRefused += 1;
+            }
             expectedBalance[buyer] += statedPrice;
             refusedResales += 1;
         }
         usdt.approve(address(mercado), 0);
         vm.stopPrank();
+    }
+
+    /// @dev The NFT changes hands through the other market, and maybe comes back. Its offer here is left behind.
+    function moveOutside(uint256 tokenSeed, uint256 toSeed, bool andBack) external {
+        (uint256 tokenId, bool ok) = _pickOffered(tokenSeed);
+        if (!ok) return;
+        ItemBook memory item = _items[tokenId];
+        if (!item.sold || item.burned || pausedBook) return;
+        address to = _actor(toSeed);
+
+        vm.prank(item.holder);
+        prenda.setApprovalForAll(address(otherMarket), true);
+        otherMarket.move(item.holder, to, tokenId);
+        _items[tokenId].moves += 1;
+        _items[tokenId].approvedForMarket = false;
+        if (andBack) {
+            vm.prank(to);
+            prenda.setApprovalForAll(address(otherMarket), true);
+            otherMarket.move(to, item.holder, tokenId);
+            _items[tokenId].moves += 1;
+        } else {
+            _items[tokenId].holder = to;
+        }
+        movesOutside += 1;
     }
 
     // ----------------------------------------------------------------------------------------------------- claims
@@ -430,8 +592,9 @@ contract ArchivoHandler is Test {
         vm.startPrank(item.holder);
         usdt.mint(fee);
         usdt.approve(address(prenda), fee);
-        try prenda.claim(tokenId, fee) {
+        try prenda.claim(tokenId, fee, bytes32(tokenId)) {
             _items[tokenId].burned = true;
+            _items[tokenId].approvedForMarket = false;
             liveCount -= 1;
             treasuryIncome += fee;
             if (fee == 0) freeClaims += 1;
@@ -449,7 +612,8 @@ contract ArchivoHandler is Test {
         address actor = _actor(actorSeed);
         address other = _actor(otherSeed);
 
-        // Only the operator creates drops and only the administration names the operator.
+        // Only the operator creates drops, only the operator and the administration close them, and only the
+        // administration names the operator.
         Venta.NewItem[] memory items = new Venta.NewItem[](1);
         items[0] = Venta.NewItem({tokenId: itemCount + 1, price: MIN_PRICE, contentHash: keccak256("x")});
         uint48 start = uint48(block.timestamp + DELAY);
@@ -457,6 +621,12 @@ contract ArchivoHandler is Test {
         try venta.createDrop(start, start, bytes32(0), Prenda.StorageTerms(0, 0, 0), items) {
             violations.push("someone who is not the operator created a drop");
         } catch {}
+        if (dropCount != 0) {
+            vm.prank(actor);
+            try venta.closeDrop(uint32(1 + (otherSeed % dropCount))) {
+                violations.push("someone who is neither the operator nor the administration closed a drop");
+            } catch {}
+        }
         vm.prank(actor);
         try venta.setOperator(actor) {
             violations.push("someone who is not the administration named the operator");
@@ -467,14 +637,14 @@ contract ArchivoHandler is Test {
         ItemBook memory item = _items[tokenId];
         if (!item.sold || item.burned) return;
 
-        // Nobody moves an NFT outside the market, not even its holder, and nobody claims for somebody else.
+        // Nobody moves an NFT outside a market, not even its holder, and nobody claims for somebody else.
         vm.prank(actor);
         try prenda.transferFrom(item.holder, other, tokenId) {
             violations.push("an NFT moved outside the market");
         } catch {}
         if (actor != item.holder) {
             vm.prank(actor);
-            try prenda.claim(tokenId, type(uint256).max) {
+            try prenda.claim(tokenId, type(uint256).max, bytes32(tokenId)) {
                 violations.push("someone claimed a garment that is not theirs");
             } catch {}
         }
@@ -483,15 +653,19 @@ contract ArchivoHandler is Test {
     // --------------------------------------------------------------------------------------------- administration
 
     function setPaused(bool paused) external {
-        if (paused == prenda.paused()) return;
+        if (paused == pausedBook) return;
         vm.prank(admin);
         if (paused) prenda.pause();
         else prenda.unpause();
+        pausedBook = paused;
     }
 
     function changeTreasury(uint256 seed) external {
+        address next = treasuries[seed % 2];
         vm.prank(admin);
-        prenda.setTreasury(treasuries[seed % 2]);
+        prenda.proposeTreasury(next);
+        vm.prank(next);
+        prenda.acceptTreasury();
     }
 
     function letTimePass(uint32 time, bool long_) external {
@@ -516,34 +690,41 @@ contract ArchivoInvariantTest is Test {
     Prenda internal prenda;
     Venta internal venta;
     Mercado internal mercado;
+    OpenMarketMock internal otherMarket;
     ArchivoHandler internal handler;
 
     function setUp() public {
         usdt = new TestUSDT0();
         prenda = new Prenda("Allka Archivo", "ALLKA", usdt, treasury, admin, "https://example.test/nft/");
         venta = new Venta(prenda, operator, 1 hours, 10 * 10 ** 6, 100 * 10 ** 6);
-        mercado = new Mercado(prenda, 10 * 10 ** 6, 30 days);
+        mercado = new Mercado(prenda, 10 * 10 ** 6);
+        otherMarket = new OpenMarketMock(prenda);
         vm.startPrank(admin);
         prenda.setMinter(address(venta), true);
         prenda.authorizeMarket(address(mercado));
+        prenda.authorizeMarket(address(otherMarket));
         vm.stopPrank();
 
-        handler = new ArchivoHandler(prenda, venta, mercado, usdt, admin, operator, secondTreasury);
+        handler = new ArchivoHandler(prenda, venta, mercado, otherMarket, usdt, admin, operator, secondTreasury);
 
-        bytes4[] memory selectors = new bytes4[](13);
+        bytes4[] memory selectors = new bytes4[](17);
         selectors[0] = ArchivoHandler.createDrop.selector;
-        selectors[1] = ArchivoHandler.cancelDrop.selector;
-        selectors[2] = ArchivoHandler.buyFirstSale.selector;
-        selectors[3] = ArchivoHandler.approveMarket.selector;
-        selectors[4] = ArchivoHandler.list.selector;
-        selectors[5] = ArchivoHandler.cancelListing.selector;
-        selectors[6] = ArchivoHandler.buyOnMarket.selector;
-        selectors[7] = ArchivoHandler.claim.selector;
-        selectors[8] = ArchivoHandler.tryWhatMustFail.selector;
-        selectors[9] = ArchivoHandler.setPaused.selector;
-        selectors[10] = ArchivoHandler.changeTreasury.selector;
-        selectors[11] = ArchivoHandler.letTimePass.selector;
-        selectors[12] = ArchivoHandler.waitForTheLastDropToOpen.selector;
+        selectors[1] = ArchivoHandler.closeDrop.selector;
+        selectors[2] = ArchivoHandler.createDropWithAUsedNumber.selector;
+        selectors[3] = ArchivoHandler.buyFirstSale.selector;
+        selectors[4] = ArchivoHandler.approveMarket.selector;
+        selectors[5] = ArchivoHandler.approveMarketForOneNft.selector;
+        selectors[6] = ArchivoHandler.list.selector;
+        selectors[7] = ArchivoHandler.cancelListing.selector;
+        selectors[8] = ArchivoHandler.buyOnMarket.selector;
+        selectors[9] = ArchivoHandler.moveOutside.selector;
+        selectors[10] = ArchivoHandler.claim.selector;
+        selectors[11] = ArchivoHandler.tryWhatMustFail.selector;
+        selectors[12] = ArchivoHandler.setPaused.selector;
+        selectors[13] = ArchivoHandler.changeTreasury.selector;
+        selectors[14] = ArchivoHandler.letTimePass.selector;
+        selectors[15] = ArchivoHandler.waitForTheLastDropToOpen.selector;
+        selectors[16] = ArchivoHandler.takeApprovalBackAndGiveItAgain.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -560,6 +741,7 @@ contract ArchivoInvariantTest is Test {
         assertEq(usdt.balanceOf(address(mercado)), 0);
         assertEq(prenda.balanceOf(address(venta)), 0);
         assertEq(prenda.balanceOf(address(mercado)), 0);
+        assertEq(prenda.balanceOf(address(otherMarket)), 0);
 
         assertEq(usdt.balanceOf(treasury) + usdt.balanceOf(secondTreasury), handler.treasuryIncome());
         uint256 heldByWallets;
@@ -571,7 +753,8 @@ contract ArchivoInvariantTest is Test {
         assertEq(usdt.totalSupply(), handler.treasuryIncome() + heldByWallets);
     }
 
-    /// @dev Every garment ever put on sale: who holds its NFT, whether it was sold and how often it changed hands.
+    /// @dev Every garment ever put on sale: its drop, who holds its NFT, whether it was sold, how often it changed
+    /// hands, its approval and its offer on the market.
     function invariant_EveryGarmentMatchesTheBooks() public view {
         uint256 count = handler.itemCount();
         uint256 alive;
@@ -581,7 +764,7 @@ contract ArchivoInvariantTest is Test {
             assertEq(dropId, item.dropId);
             assertEq(price, item.price);
             assertEq(sold, item.sold);
-            assertEq(contentHash, keccak256(abi.encode(tokenId)));
+            assertEq(contentHash, handler.fingerprint(tokenId, item.dropId));
             assertEq(prenda.isTokenIdUsed(tokenId), item.sold);
             assertEq(prenda.transferCountOf(tokenId), item.moves);
 
@@ -589,9 +772,11 @@ contract ArchivoInvariantTest is Test {
                 alive += 1;
                 assertEq(prenda.ownerOf(tokenId), item.holder);
                 assertEq(prenda.contentHashOf(tokenId), contentHash);
+                assertEq(prenda.getApproved(tokenId), item.approvedForMarket ? address(mercado) : address(0));
                 (uint48 freeUntil, , ) = prenda.storageTermsOf(tokenId);
                 assertEq(freeUntil, item.freeUntil);
             } else {
+                assertFalse(item.approvedForMarket);
                 try prenda.ownerOf(tokenId) returns (address) {
                     revert("an NFT that was not sold, or was burned, has a holder");
                 } catch {}
@@ -601,6 +786,9 @@ contract ArchivoInvariantTest is Test {
             Mercado.Listing memory recorded = mercado.listingOf(tokenId);
             assertEq(recorded.seller, listing.exists ? listing.seller : address(0));
             assertEq(recorded.price, listing.price);
+            assertEq(recorded.expiresAt, listing.expiresAt);
+            assertEq(recorded.transferCount, listing.moves);
+            assertEq(recorded.approvalsRevoked, listing.revoked);
         }
         assertEq(alive, handler.liveCount());
 
@@ -611,53 +799,117 @@ contract ArchivoInvariantTest is Test {
         assertEq(held, alive);
     }
 
+    /// @dev What the books kept on the side instead of reading it from the contracts: drops closed, approvals for
+    /// the market, approvals taken back and the pause.
+    function invariant_SwitchesAndApprovalsMatchTheBooks() public view {
+        assertEq(prenda.paused(), handler.pausedBook());
+        assertEq(venta.dropCount(), handler.dropCount());
+        for (uint32 dropId = 1; dropId <= handler.dropCount(); dropId++) {
+            assertEq(venta.dropOf(dropId).closed, handler.dropBook(dropId).closed);
+        }
+        for (uint256 i = 0; i < handler.actorCount(); i++) {
+            address actor = handler.actors(i);
+            assertEq(prenda.isApprovedForAll(actor, address(mercado)), handler.approvesMarket(actor));
+            assertEq(prenda.approvalsRevoked(actor, address(mercado)), handler.revokedBook(actor));
+        }
+    }
+
     /**
-     * @dev The same handler driven by a fixed pseudo-random sequence, so that the run is always the same and the
-     * test can check that every kind of operation really happened.
+     * @dev The same handler driven by fixed pseudo-random sequences, so that every run is the same and the tests
+     * can check that every kind of operation really happened. There are several short walks instead of a long
+     * one: a failing walk prints every call it made, and a long one runs out of memory before it can report.
      */
-    function test_FixedRandomWalkOverTheThreeContracts() public {
-        uint256 steps = 2500;
+    function test_FixedRandomWalkA() public {
+        _walk("archivo a");
+    }
+
+    function test_FixedRandomWalkB() public {
+        _walk("archivo b");
+    }
+
+    function test_FixedRandomWalkC() public {
+        _walk("archivo c");
+    }
+
+    function test_FixedRandomWalkD() public {
+        _walk("archivo d");
+    }
+
+    function test_FixedRandomWalkE() public {
+        _walk("archivo e");
+    }
+
+    function _walk(string memory name) internal {
+        uint256 steps = 800;
         for (uint256 i = 0; i < steps; i++) {
-            uint256 r = uint256(keccak256(abi.encode("archivo", i)));
+            uint256 r = uint256(keccak256(abi.encode(name, i)));
             uint256 a = uint256(keccak256(abi.encode(r, uint256(1))));
             uint256 b = uint256(keccak256(abi.encode(r, uint256(2))));
             uint256 c = uint256(keccak256(abi.encode(r, uint256(3))));
             uint256 kind = r % 100;
 
-            if (kind < 8) {
+            if (kind < 7) {
                 handler.createDrop(a, uint80(b), c % 2 == 0, uint32(a >> 96), uint80(b >> 96), uint80(c >> 96));
-            } else if (kind < 10) handler.cancelDrop(a, b % 2 == 0);
-            else if (kind < 14) handler.waitForTheLastDropToOpen();
+                // Half of the new drops are open right away, so that the purchases that follow find them on sale,
+                // and a few are closed before they open.
+                if (c % 16 < 8) handler.waitForTheLastDropToOpen();
+                else if (c % 16 < 10) handler.closeDrop(0, b % 2 == 0);
+            } else if (kind < 9) handler.closeDrop(a, b % 2 == 0);
+            else if (kind < 12) {
+                handler.createDropWithAUsedNumber(a, uint80(b), c % 2 == 0);
+                if (c % 4 < 2) handler.waitForTheLastDropToOpen();
+            } else if (kind < 15) handler.waitForTheLastDropToOpen();
             else if (kind < 36) handler.buyFirstSale(a, b, c);
-            else if (kind < 40) handler.approveMarket(a, b % 5 != 0);
-            else if (kind < 56) handler.list(a, uint80(b), uint48(c), c % 6 != 0, b >> 8);
-            else if (kind < 60) handler.cancelListing(a, b % 3 != 0, c);
-            else if (kind < 78) handler.buyOnMarket(a, b, c);
-            else if (kind < 84) handler.claim(a);
+            else if (kind < 39) handler.approveMarket(a, b % 5 != 0);
+            else if (kind < 42) handler.approveMarketForOneNft(a, b % 3 != 0);
+            else if (kind < 56) {
+                handler.list(a, uint80(b), uint48(c), c % 6 != 0, b >> 8);
+                // Now and then somebody takes the offer that was just made.
+                if (c % 8 < 3) handler.buyOnMarket(0, b >> 16, (c << 1) | 1);
+            } else if (kind < 58) handler.cancelListing(a, b % 3 != 0, c);
+            else if (kind < 71) handler.buyOnMarket(a, b, c);
+            else if (kind < 76) {
+                // The NFT moves outside the market and right away somebody tries to take the offer left behind.
+                handler.moveOutside(a, b, c % 2 == 0);
+                handler.buyOnMarket(a, b >> 16, (c << 1) | 1);
+            } else if (kind < 79) {
+                // The same with an approval taken back and given again.
+                handler.takeApprovalBackAndGiveItAgain(a);
+                handler.buyOnMarket(a, b >> 16, (c << 1) | 1);
+            } else if (kind < 85) handler.claim(a);
             else if (kind < 88) handler.tryWhatMustFail(a, b, c);
-            else if (kind < 90) handler.setPaused(a % 3 == 0);
+            else if (kind < 90) handler.setPaused(a % 4 == 0);
             else if (kind < 92) handler.changeTreasury(a);
-            else handler.letTimePass(uint32(a), b % 12 == 0);
+            else handler.letTimePass(uint32(a), b % 5 == 0);
 
             if (i % 100 == 0) _checkEverything();
         }
         _checkEverything();
 
-        // The walk must really have gone through every kind of operation.
-        assertGt(handler.dropCount(), 100);
-        assertGt(handler.cancelledDrops(), 5);
-        assertGt(handler.earlyPurchases(), 10);
-        assertGt(handler.publicPurchases(), 50);
-        assertGt(handler.refusedPurchases(), 100);
-        assertGt(handler.resales(), 20);
-        assertGt(handler.refusedResales(), 100);
-        assertGt(handler.paidClaims(), 15);
-        assertGt(handler.freeClaims(), 15);
+        // Each walk must really have gone through every kind of operation, including the ones that must fail.
+        assertGt(handler.dropCount(), 40);
+        assertGt(handler.dropsClosedBeforeOpening(), 0);
+        assertGt(handler.dropsClosedWhileOpen(), 3);
+        assertGt(handler.garmentsRelisted(), 1);
+        assertGt(handler.refusedRelistings(), 5);
+        assertGt(handler.earlyPurchases(), 3);
+        assertGt(handler.publicPurchases(), 10);
+        assertGt(handler.refusedPurchases(), 50);
+        assertGt(handler.purchasesRefusedForTheDrop(), 0);
+        assertGt(handler.offersMade(), 15);
+        assertGt(handler.resales(), 7);
+        assertGt(handler.refusedResales(), 80);
+        assertGt(handler.staleOffersRefused(), 0);
+        assertGt(handler.revokedOffersRefused(), 0);
+        assertGt(handler.movesOutside(), 7);
+        assertGt(handler.paidClaims(), 0);
+        assertGt(handler.freeClaims(), 5);
     }
 
     function _checkEverything() internal view {
         invariant_EveryOperationEndedAsTheBooksExpected();
         invariant_MoneyIsWhereTheBooksSay();
         invariant_EveryGarmentMatchesTheBooks();
+        invariant_SwitchesAndApprovalsMatchTheBooks();
     }
 }

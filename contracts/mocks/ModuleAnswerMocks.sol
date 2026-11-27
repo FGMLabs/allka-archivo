@@ -38,3 +38,20 @@ contract LongAnswerMock {
         }
     }
 }
+
+/// @notice Answers every call with one word: the address it was given, with a bit set above the address.
+contract DirtyAnswerMock {
+    bytes32 private immutable _answer;
+
+    constructor(address named) {
+        _answer = bytes32(uint256(uint160(named)) | (1 << 255));
+    }
+
+    fallback() external {
+        bytes32 answer = _answer;
+        assembly ("memory-safe") {
+            mstore(0x00, answer)
+            return(0x00, 0x20)
+        }
+    }
+}
