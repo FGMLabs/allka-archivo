@@ -43,6 +43,29 @@ export default defineConfig({
       },
     },
   },
+  // Publishing the source code on ConfluxScan, the explorer of Conflux eSpace,
+  // so that anyone can read the contracts next to their addresses. ConfluxScan
+  // asks for an API key but accepts any value (Conflux docs, "Verify
+  // Contracts"): "espace" is a placeholder, not a secret. After a deployment:
+  // npx hardhat ignition verify chain-71
+  chainDescriptors: {
+    71: {
+      name: "Conflux eSpace Testnet",
+      chainType: "generic",
+      blockExplorers: {
+        etherscan: {
+          name: "ConfluxScan",
+          url: "https://evmtestnet.confluxscan.org",
+          apiUrl: "https://evmapi-testnet.confluxscan.org/api/",
+        },
+      },
+    },
+  },
+  verify: {
+    etherscan: { apiKey: "espace" },
+    blockscout: { enabled: false },
+    sourcify: { enabled: false },
+  },
   // Only the test network is configured. Mainnet is left out on purpose until
   // the owner decides to go there: it will get its own key and its own
   // deployment module, so that a wrong --network cannot put a test deployment
