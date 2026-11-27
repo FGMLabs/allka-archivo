@@ -27,5 +27,7 @@ These are the properties the tests and the future audit should hold the contract
 - No Market, current or future, can move an NFT without its owner's approval.
 - Only the owner of an NFT can claim its garment, and only the owner can give someone permission over it.
 - The terms of a drop (price, storage rules) cannot be made worse for holders after it is created.
+- A buyer names the drop and the price they saw. The purchase goes through only under those terms.
+- A resale offer stops for good when it expires, when the NFT changes hands or when the seller takes the permission back from the Market. It never comes back to life.
 - A burned NFT number is never sold again.
 - Private keys never live in this repository.

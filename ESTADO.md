@@ -8,8 +8,8 @@ Bitácora del proyecto: decisiones, avance y pendientes. Se lee al empezar cada 
 
 - Fase 0 terminada. La arquitectura se aprobó el 26/11/2026, ya corregida tras una revisión de seguridad independiente.
 - Fase 1 en curso (contratos).
-  - Hecho: proyecto Hardhat 3, pruebas automáticas en cada cambio (CI), el token de prueba `TestUSDT0` y los tres contratos (`Prenda`, `Venta` y `Mercado`) con sus tests. `Prenda` ya pasó por una revisión independiente.
-  - Falta: revisión independiente de `Venta` y `Mercado` y de los tres juntos, y despliegue en la testnet de Conflux eSpace.
+  - Hecho: proyecto Hardhat 3, pruebas automáticas en cada cambio (CI), el token de prueba `TestUSDT0` y los tres contratos (`Prenda`, `Venta` y `Mercado`) con sus tests. Dos revisiones independientes: una de `Prenda` y otra de `Venta`, `Mercado` y los tres juntos. Ninguna encontró fallas críticas ni altas; lo que encontraron está corregido. También están escritas las decisiones que el dueño aprobó el 26/11/2026.
+  - Falta: una revisión independiente de lo que cambió después de esas dos, y el despliegue en la testnet de Conflux eSpace, que se hace desde la computadora del dueño.
 
 ## Decisiones tomadas
 
@@ -24,6 +24,11 @@ Bitácora del proyecto: decisiones, avance y pendientes. Se lee al empezar cada 
 9. Red Conflux eSpace. Todo en testnet hasta nuevo aviso. Sin escrow. Datos de envío y de factura solo al reclamar.
 10. Sitio en inglés y español, primero celular, con Next.js sobre Vercel.
 11. Repositorio público en la organización FGM Labs, con licencia MIT.
+12. `Prenda` suma cuatro protecciones: perdón de guarda para todas las prendas a la vez, cambio de tesorería que la billetera nueva tiene que confirmar, una llave que solo puede pausar, y un reclamo que lleva el número del pedido.
+13. Un drop que ya abrió se puede cerrar para dejar de vender lo que queda.
+14. Una oferta de reventa dura como máximo 30 días.
+
+Las decisiones 12 a 14 son del 26/11/2026. El dueño las aprobó aclarando que, mientras todo esté en testnet, se pueden corregir.
 
 ## Números por definir
 
@@ -31,12 +36,12 @@ Se cargan por drop. En testnet se usan valores de prueba.
 
 - Meses de guarda gratis, valor de la cuota y máximo acumulado.
 - Cuántas horas dura la ventana anticipada y cuánto $FGM hace falta para entrar en la foto.
-- Direcciones de operador, tesorería y administración.
+- Direcciones de operador, tesorería, administración y pausa. La tesorería tiene que ser una billetera propia y no la dirección de depósito de un exchange: para cambiarla, la billetera nueva tiene que confirmar.
 
 Se fijan al desplegar cada módulo y después no se pueden cambiar (para cambiarlos se despliega un módulo nuevo):
 
 - `Venta`: precio mínimo de una prenda, tope máximo de guarda que puede poner un drop y demora mínima entre cargar un drop y que abra (24 horas en mainnet).
-- `Mercado`: precio mínimo de una oferta y cuánto puede durar como máximo (propuesta: 30 días).
+- `Mercado`: precio mínimo de una oferta. La duración máxima de una oferta, 30 días, quedó escrita como constante en el contrato.
 
 Para la Fase 4:
 
@@ -49,14 +54,14 @@ Para la Fase 4:
 
 - `Prenda` es el contrato permanente: guarda las reglas de guarda por drop, la lista de quién puede crear NFT (`Venta`) y la lista de Mercados autorizados, y hace el reclamo.
 - El Mercado no es operador universal. Hace falta la aprobación normal del dueño (ERC-721); `Prenda` solo limita quién puede ejecutar transferencias. Un Mercado nuevo arranca sin poder sobre ningún NFT. Un Mercado apagado queda bloqueado para siempre, también si después se liberan las transferencias.
-- Tres direcciones: operador (crea drops, no fija destinatarios de plata), tesorería (recibe; se puede cambiar) y administración (interruptores). Cambio de dueño en dos pasos.
-- Drops: precio mínimo y guarda máxima en el contrato; apertura al menos 24 horas después de crear; cancelable antes de abrir; un número de NFT se vende una sola vez y un número quemado no se vuelve a crear.
+- Cuatro direcciones: operador (crea drops, no fija destinatarios de plata), tesorería (recibe; para cambiarla, la nueva tiene que confirmar), administración (interruptores; cambia de manos en dos pasos) y pausa (solo puede pausar).
+- Drops: precio mínimo y guarda máxima en el contrato; apertura al menos 24 horas después de crear; se puede cerrar en cualquier momento, antes o después de abrir; un número de NFT se vende una sola vez y un número quemado no se vuelve a crear.
 - Entrada anticipada: la foto de saldos se publica como una raíz de Merkle por drop; cada billetera de la lista compra una prenda en la ventana anticipada.
-- Compra con precio esperado; reclamo con guarda máxima aceptada; aprobaciones por el monto exacto; los contratos cobran solo de quien llama y nunca tienen saldo.
-- Publicaciones: al comprar se verifica que el vendedor siga siendo el dueño; una publicación deja de valer si el NFT cambió de manos; precio mínimo; comisión constante del 2%.
-- Guarda: período gratis desde la venta original; una cuota por cada 30 días cumplidos después; máximo obligatorio por drop; la administración solo puede bajarla. Si la guarda es cero, el reclamo no llama al token.
-- Reclamo: el pedido se crea solo desde el evento de quema en la cadena; los datos de envío se aceptan solo firmados por la billetera que quemó y se pueden corregir hasta el despacho; el sitio valida el país antes de la quema; se despacha con el bloque finalizado.
-- La pausa frena compras y reventa. Los reclamos no se pausan.
+- Compra con precio esperado y nombrando el drop; reclamo con guarda máxima aceptada; aprobaciones por el monto exacto; los contratos cobran solo de quien llama y nunca tienen saldo.
+- Publicaciones: al comprar se verifica que el vendedor siga siendo el dueño; una publicación deja de valer si el NFT cambió de manos, si venció o si el vendedor le quitó un permiso al Mercado; no revive; precio mínimo; comisión constante del 2%.
+- Guarda: período gratis desde la venta original; una cuota por cada 30 días cumplidos después; máximo obligatorio por drop; la administración solo puede bajarla, a una prenda o a todas a la vez. Si la guarda es cero, el reclamo no llama al token.
+- Reclamo: antes de la quema el sitio valida el país y guarda los datos de envío con un número de pedido; la quema nombra ese número; el pedido se confirma solo desde el evento de quema en la cadena; los datos se pueden corregir hasta el despacho, con la firma de la billetera que quemó; se despacha con el bloque finalizado.
+- La pausa frena compras y reventa. Los reclamos no se pausan. Pausar lo pueden hacer la administración y la llave de pausa; reanudar, solo la administración.
 - No se usa EIP-3009 en la versión 1. Para la Etapa 2 se usaría la variante que solo puede ejecutar quien recibe (`receiveWithAuthorization`).
 - No hay publicaciones reservadas para un comprador.
 - Datos del NFT sellados con una huella al crear el drop.
@@ -66,18 +71,22 @@ Límites conocidos, sin agregar maquinaria: el candado de transferencias no impi
 
 ## Cómo quedó `Prenda`
 
-Decisiones tomadas al escribirlo. Las que dicen "a confirmar" son propuestas del equipo técnico que el dueño todavía no aprobó.
+Decisiones tomadas al escribirlo. Las que dicen "a confirmar" son propuestas del equipo técnico que el dueño todavía no vio una por una; se repasan con él antes de mainnet.
 
 - Reclama solo el dueño del NFT. Ni un Mercado con permiso, ni la administración, ni el módulo de venta pueden reclamar por él.
 - La guarda de cada NFT (tiempo gratis, cuota y tope) se fija al venderlo y queda guardada en `Prenda`. El tiempo gratis corre desde ese momento.
-- Perdonar guarda es darle más tiempo gratis a una prenda: la fecha solo puede avanzar. También sirve de salida si USDT0 dejara de funcionar, porque con la guarda en cero el reclamo no toca el token.
+- Perdonar guarda es dar más tiempo gratis: la fecha solo puede avanzar. Se puede perdonar a una prenda o a todas a la vez; el perdón para todas alcanza también a las prendas que se vendan después. Es la salida si USDT0 dejara de funcionar para este contrato, porque con la guarda en cero el reclamo no toca el token.
 - La moneda de la guarda queda fija al desplegar. La tesorería vive en `Prenda` y los módulos `Venta` y `Mercado` la leen de ahí: un solo cambio alcanza a todo.
+- La tesorería cambia en dos pasos: la administración propone y la billetera nueva confirma. Hasta que confirme, la plata sigue yendo a la tesorería anterior. Una dirección mal escrita nunca llega a ser tesorería, porque nadie puede confirmar por ella.
+- La llave de pausa solo puede pausar. No puede reanudar ni usar ningún otro interruptor. La nombra y la quita la administración.
+- El reclamo lleva el número del pedido y lo deja escrito en el aviso de la quema. El contrato no lo revisa: lo usa el servidor para unir la quema con los datos de envío. Queda público para siempre, así que tiene que ser un número sin significado, nunca datos personales ni algo calculado a partir de ellos.
 - Cada NFT cuenta cuántas veces cambió de manos. El Mercado lo va a usar para descartar publicaciones hechas por un dueño anterior.
 - El NFT se crea sin pasarle el control al comprador en medio de la compra (`_mint` y no `_safeMint`).
 - Un NFT no se puede crear ni enviar a la dirección del propio contrato: ahí quedaría perdido.
 - Cada módulo de venta y cada Mercado tiene que declarar que fue hecho para este contrato. Es una traba contra registrar por error otra dirección, y hace que la administración no pueda registrar (y después bloquear) billeteras o contratos ajenos.
 - El aviso que deja cada NFT al crearse dice qué módulo lo creó.
-- A confirmar: permisos más estrictos que en un NFT común. Solo los da el dueño, solo a quien puede mover NFT (con las transferencias cerradas, solo a un Mercado autorizado), y un Mercado apagado pierde los que tenía.
+- `Prenda` cuenta cada vez que un dueño le quita un permiso a alguien. El Mercado guarda ese número con cada oferta y la descarta si cambió: quitarle el permiso al Mercado retira para siempre las ofertas hechas con ese permiso.
+- A confirmar: permisos más estrictos que en un NFT común. Solo los da el dueño, solo a quien puede mover NFT (con las transferencias cerradas, solo a un Mercado autorizado), y un Mercado apagado pierde los que tenía, también a la vista de quien consulte el contrato.
 - A confirmar: la dirección web de los datos de los NFT se puede cambiar; lo que no se puede cambiar es la huella de los datos de cada NFT.
 - A confirmar: la administración no se puede abandonar, para que el contrato nunca quede sin nadie que pueda pausar o cambiar la tesorería.
 
@@ -85,7 +94,7 @@ Cómo se probó:
 
 - Tests de cada función, incluidos los caminos que deben fallar, con valores al azar para la guarda y el reclamo.
 - Dueños que son contratos en vez de billeteras comunes, un token de pago que bloquea cuentas (como puede hacer el emisor de USDT0) y otro que intenta colarse en medio de un reclamo.
-- Secuencias al azar de miles de operaciones (ventas, reventas, reclamos, pausas, perdones, cambios de tesorería) que comparan el contrato contra una contabilidad aparte después de cada paso.
+- Secuencias al azar de miles de operaciones (ventas, reventas, permisos dados y quitados, reclamos, pausas, perdones, cambios de tesorería) que comparan el contrato contra una contabilidad aparte después de cada paso. Esa contabilidad no le pregunta nada al contrato para decidir qué tiene que pasar.
 - Además se rompe el contrato a propósito, una regla por vez, para comprobar que algún test lo nota.
 
 ### Revisión independiente de `Prenda` (26/11/2026)
@@ -100,40 +109,48 @@ Corregido:
 - Pedir solo que un módulo "sea un contrato" era una traba débil, y dejaba a la administración registrar y bloquear cualquier contrato. Ahora cada módulo declara para qué contrato fue hecho.
 - Tests: el revisor mostró 14 cambios al contrato que los tests originales no notaban. Se sumaron tests para todos, más los de la lista de arriba.
 
+Protecciones que propuso el revisor. El dueño las aprobó el 26/11/2026 y ya están en el contrato, con sus tests:
+
+1. Perdón general de guarda. Si el emisor de USDT0 bloqueara la dirección de `Prenda`, o si USDT0 dejara de funcionar, los reclamos con guarda quedan frenados. Antes la única salida era perdonar prenda por prenda; ahora hay un perdón para todas a la vez.
+2. Cambio de tesorería en dos pasos: la billetera nueva tiene que confirmar. Evita mandar la plata a una dirección mal escrita. Pide que la tesorería sea una billetera propia y no la dirección de depósito de un exchange.
+3. Una llave que solo puede pausar, para no depender de la llave guardada en una emergencia.
+4. El reclamo lleva el número del pedido. Ata la quema a los datos de envío sin depender de una firma, que algunas billeteras-contrato no pueden dar.
+
 Decisiones que quedan abiertas. Ninguna frena la versión 1 en testnet, pero hay que tomarlas antes de mainnet porque `Prenda` después no se puede cambiar:
 
-1. Perdón general de guarda. Si el emisor de USDT0 bloqueara la dirección de `Prenda`, o si USDT0 dejara de funcionar, los reclamos con guarda quedan frenados y hoy la salida es perdonar prenda por prenda. Propuesta: un perdón para todas a la vez.
-2. Cambio de tesorería en dos pasos: que la billetera nueva tenga que confirmar. Evita mandar la plata a una dirección mal escrita. Pide que la tesorería sea una billetera propia y no la dirección de depósito de un exchange.
-3. Una llave que solo pueda pausar, para no depender de la llave guardada en una emergencia.
-4. Que el reclamo lleve el número del pedido. Ata la quema a los datos de envío sin depender de una firma, que algunas billeteras-contrato no pueden dar.
-5. Un tope de guarda fijo dentro de `Prenda`, además del que tenga `Venta`.
-6. Qué cubre exactamente la huella de cada NFT. Se define junto con el catálogo, en la Fase 2.
-7. Extras opcionales: aviso de cambio de datos (ERC-4906), datos de la colección y cantidad total de NFT.
-8. Un rescate para tokens enviados por error al contrato.
+1. Un tope de guarda fijo dentro de `Prenda`, además del que tenga `Venta`.
+2. Qué cubre exactamente la huella de cada NFT. Se define junto con el catálogo, en la Fase 2.
+3. Extras opcionales: aviso de cambio de datos (ERC-4906), datos de la colección y cantidad total de NFT.
+4. Un rescate para tokens enviados por error al contrato.
 
 Límites conocidos que se suman:
 
-- Que un módulo declare para qué contrato fue hecho no prueba que sea seguro. Cada módulo necesita su propia revisión.
+- Que un módulo declare para qué contrato fue hecho no prueba que sea seguro. Cada módulo necesita su propia revisión. Tampoco dice si es un módulo de venta o un Mercado: la administración podría registrar uno en el lugar del otro.
+- Un módulo de venta retirado se puede volver a habilitar, y entonces sus drops abiertos vuelven a vender. Antes de retirar un módulo conviene cerrar sus drops.
 - El contador de cambios de manos también cuenta un movimiento que deja el NFT en el mismo dueño.
-- Un perdón de guarda con la fecha mal escrita no se puede deshacer. El error siempre queda a favor del dueño de la prenda.
+- Un perdón de guarda con la fecha mal escrita no se puede deshacer. El error siempre queda a favor de quien tiene la prenda. En el perdón para todas pesa más, porque alcanza también a las prendas que se vendan después: el panel de administración tiene que armar la fecha y mostrarla antes de firmar.
+- Quien tenga la llave de pausa puede pausar una y otra vez. Si se pierde o la roban, la administración la quita.
+- El número de pedido no prueba nada por sí solo: cualquiera puede copiar el de otra persona en su propia quema. El servidor tiene que comprobar a la vez el número, el NFT y la billetera que quemó.
 - Si compra un contrato que después no puede operar, su NFT queda trabado. Es responsabilidad de ese comprador.
 - La llave de administración también es la llave del stock sin vender: quien la tenga puede sumar un módulo de venta falso, crear NFT y reclamarlos.
-
-Para tener en cuenta en `Mercado`: tiene que ser inmutable y entregar el NFT con la transferencia simple. Las publicaciones necesitan cancelación y vencimiento, porque una publicación vieja puede revivir si el dueño le quita el permiso al Mercado y más adelante se lo vuelve a dar.
 
 Para tener en cuenta en la Etapa 2 (tarjeta): no hay forma de quitar un NFT después de un contracargo, y pagar la guarda con tarjeta implica que FGM la perdone en la cadena.
 
 Pendientes que salieron al escribirlo:
 
 - Fase 4: antes de despachar, el servidor tiene que comprobar que el NFT quemado nació de una venta oficial (el aviso de creación dice qué módulo lo creó), además de que la quema esté finalizada.
+- Fase 4: el servidor une cada quema con su pedido comprobando a la vez el número de pedido, el NFT y la billetera. Una quema hecha por fuera del sitio llega sin número de pedido: tiene que poder completarse después, con la firma de esa billetera.
+- Fase 4: el panel de administración arma las fechas de los perdones de guarda y muestra en claro qué se va a firmar.
 - Antes de mainnet: la dirección de administración debería ser una billetera de varias firmas, y hay que vigilar los avisos de cambios de administración (tesorería, módulos de venta y Mercados nuevos).
 
 ## Cómo quedaron `Venta` y `Mercado`
 
 `Venta` (la venta primaria):
 
-- Un drop es una lista de prendas, cada una con su número, su precio y la huella de sus datos, más las fechas y las reglas de guarda. Una vez cargado no se puede cambiar. Antes de abrir lo pueden cancelar el operador o la administración, y sus prendas pueden ir a un drop nuevo.
+- Un drop es una lista de prendas, cada una con su número, su precio y la huella de sus datos, más las fechas y las reglas de guarda. Una vez cargado no se puede cambiar.
+- Un drop se puede cerrar en cualquier momento, antes o después de abrir. Lo cierran el operador o la administración. Lo que ya vendió queda vendido; lo que no vendió deja de estar en venta y puede ir a un drop nuevo, que espera la demora mínima como cualquier otro. Una prenda que vuelve a salir puede hacerlo con otro precio, otra guarda y otra huella, y con turnos anticipados nuevos.
 - Comprar cobra y crea el NFT en la misma operación: el precio va directo de la billetera del comprador a la tesorería. Si algo falla, no pasa nada de las dos cosas.
+- Quien compra dice el número del drop en el que vio la prenda y el precio que vio. Si la prenda ahora está en otro drop, la compra no se hace: así nadie compra con una guarda o unos datos distintos de los que tenía a la vista.
 - Entrada anticipada: durante esa ventana compra solo quien esté en la foto, una prenda por billetera y por drop. Una compra que falla no gasta el turno.
 - No tiene administración propia: sigue a la de `Prenda`, que solo nombra al operador. La tesorería, la moneda y la pausa son las de `Prenda`.
 - El contrato rechaza un drop que abra antes de la demora mínima, precios por debajo del mínimo, guardas por encima del tope y números ya usados o que estén en otro drop.
@@ -142,22 +159,44 @@ Pendientes que salieron al escribirlo:
 `Mercado` (la reventa):
 
 - El NFT se queda en la billetera de su dueño hasta que se vende. El contrato nunca tiene plata ni NFT.
-- Para publicar hay que haberle dado permiso al Mercado antes. Publicar de nuevo cambia la oferta.
+- Para publicar hay que haberle dado permiso al Mercado antes. Publicar de nuevo cambia la oferta. Una oferta dura como máximo 30 días.
 - Al comprar se reparte el pago: 98% al vendedor y 2% a la tesorería. La comisión está escrita como constante y no hay nadie que administre el contrato: no se puede cambiar. Si un precio no da una comisión exacta, se redondea a favor del vendedor.
-- Una oferta deja de valer si el NFT cambió de manos (aunque después vuelva al vendedor), si venció o si el vendedor la retira.
-- Límite conocido: una oferta queda guardada hasta que se retira, vence o el NFT cambia de manos. Si el vendedor le quita el permiso al Mercado y más adelante se lo vuelve a dar, esa oferta vuelve a poder tomarse al precio viejo. Por eso las ofertas vencen, y el sitio le tiene que mostrar al vendedor todas sus ofertas abiertas.
+- Una oferta deja de valer si el NFT cambió de manos (aunque después vuelva al vendedor), si venció, si el vendedor la retira o si el vendedor le quitó un permiso al Mercado. Una oferta que dejó de valer no revive: hay que publicar de nuevo.
 - Límite conocido: si el emisor de USDT0 bloqueara la dirección de `Venta` o de `Mercado`, ese módulo deja de poder cobrar. La salida es desplegar uno nuevo.
+- Límite conocido: la pausa no detiene el reloj. Una pausa que cubra la ventana anticipada de un drop la consume, y las ofertas de reventa siguen venciendo.
+- Límite conocido: el turno anticipado es una prenda por billetera y por drop. Si una colección se parte en varios drops, cada billetera de la foto tiene un turno en cada uno.
+- Límite conocido: las fechas de un drop no tienen tope. Un drop con la fecha pública mal escrita queda abierto solo para la foto; se arregla cerrándolo y cargándolo de nuevo.
 
-A confirmar por el dueño:
-
-- Hoy un drop que ya abrió no se puede cerrar: lo que no se vendió queda en venta. Propuesta: que el operador pueda cerrar un drop abierto para dejar de vender lo que queda (por ejemplo, si una prenda se daña).
-- Duración máxima de una oferta de reventa. Propuesta: 30 días.
-
-Cómo se probaron: tests de cada función con sus caminos de falla, un token de pago que bloquea cuentas y otro que intenta colarse en medio de una compra, y secuencias al azar sobre los tres contratos juntos que siguen cada peso: qué tiene que tener cada billetera y qué tiene que haber recibido la tesorería. Además un recorrido completo en TypeScript: dos personas compran, se revenden un NFT, una reclama, se carga un drop nuevo, y lo que no debe poder hacerse falla.
-
-Los tres contratos también se rompieron a propósito, una regla por vez: 187 variantes en total (90 de `Prenda`, 57 de `Venta` y 40 de `Mercado`). Los tests detectaron 186. La que queda no cambia nada: en `Mercado` se comprueba dos veces que el NFT siga en manos del vendedor, y sacar una de las dos comprobaciones da el mismo resultado.
+Cómo se probaron: tests de cada función con sus caminos de falla, un token de pago que bloquea cuentas, otro que responde "no" en vez de fallar y otro que le pasa el control al comprador y al vendedor en medio de una compra, y secuencias al azar sobre los tres contratos juntos que siguen cada peso: qué tiene que tener cada billetera y qué tiene que haber recibido la tesorería. Además, en TypeScript: el recorrido completo (dos personas compran, se revenden un NFT, una reclama, se carga un drop nuevo, se cierra un drop abierto, y lo que no debe poder hacerse falla), una foto de saldos armada con la librería real de OpenZeppelin y el módulo de despliegue.
 
 El despliegue de los cuatro contratos (con el token de prueba) se probó en una red simulada.
+
+### Segunda revisión independiente (26/11/2026)
+
+La hizo otro revisor aparte, sobre `Venta`, `Mercado`, las correcciones de `Prenda` y los tres contratos juntos. No encontró fallas críticas ni altas, ni ninguna forma de robar o trabar plata o NFT. Encontró dos problemas medios y varios menores. No reemplaza a la auditoría externa.
+
+Corregido:
+
+- Medio: una oferta de reventa podía revivir. Si el vendedor le quitaba el permiso al Mercado creyendo que así retiraba la oferta, y semanas después se lo volvía a dar (por ejemplo, para vender otra prenda), la oferta vieja volvía a poder tomarse al precio viejo. Ahora quitarle un permiso al Mercado mata para siempre las ofertas hechas con ese permiso. Para eso `Prenda` lleva la cuenta de los permisos quitados.
+- Medio: un drop abierto no se podía frenar. Con la llave del operador robada, alguien podía cargar prendas reales al precio mínimo, con una ventana anticipada solo para sus billeteras, y si nadie lo notaba antes de abrir ya no había forma de pararlo. Ahora el operador y la administración pueden cerrar un drop en cualquier momento (era además la decisión 13 del dueño).
+- Menor: la compra fijaba solo el precio. Ahora también nombra el drop.
+- Menor: la duración máxima de una oferta se podía desplegar con cualquier valor. Ahora son 30 días fijos en el contrato.
+- Menor: un Mercado apagado seguía figurando con el permiso de un NFT puntual. Ya no figura, y no acepta ofertas nuevas.
+- El módulo de despliegue de prueba no estaba atado a una red de prueba. Ahora el token de prueba se niega a desplegarse en la mainnet de Conflux eSpace, y la mainnet se quitó de la configuración hasta que el dueño decida ir.
+- Tests: el revisor mostró 19 cambios a `Venta` y `Mercado` que los tests no notaban. Se sumaron tests para todos. Las secuencias al azar ahora mueven NFT por un segundo Mercado, reutilizan números de prendas, dan y quitan permisos y llevan su propia cuenta de permisos y pausas. Las caminatas largas se partieron en varias cortas, porque una caminata larga que fallaba se quedaba sin memoria antes de decir qué había fallado.
+
+Lo que la revisión señaló y no se cambió, con su motivo:
+
+- Fechas de un drop sin tope: con el cierre de drops, una fecha mal escrita ya tiene arreglo. Queda como límite conocido.
+- Demora mínima de apertura sin piso en el contrato: en testnet hace falta una demora corta. El módulo de despliegue de mainnet la va a fijar en 24 horas.
+- Tamaño de un drop: cargar cada prenda cuesta gas. Según la estimación del revisor, unas 100 prendas rondan los 9,3 millones de gas en eSpace. El panel tiene que limitar cuántas prendas entran en un drop, y el número se mide en testnet.
+
+Para la Fase 2 y la Fase 3 (sitio):
+
+- El sitio tiene que mostrarle al vendedor qué ofertas suyas siguen valiendo. Propuesta a decidir en la Fase 3: una consulta en `Mercado` que diga si una oferta se puede tomar ahora.
+- El servidor tiene que comparar cada drop nuevo con el catálogo, no solo mirar qué módulo creó el NFT: con la llave del operador robada, un drop falso sale del módulo oficial.
+
+Sin verificar todavía, porque hace falta la red real: el gas por transacción y las reglas de eSpace, y el comportamiento del USDT0 real.
 
 ## Tecnologías
 
@@ -180,14 +219,18 @@ Volver a verificar antes de usarlos. Fecha de la verificación entre paréntesis
 - Verificación del código en ConfluxScan desde Hardhat: API de testnet `https://evmapi-testnet.confluxscan.org/api/` y de mainnet `https://evmapi.confluxscan.org/api/` (26/11/2026). https://doc.confluxnetwork.org/docs/espace/tutorials/VerifyContracts
 - Solidity: se eligió la 0.8.38 (publicada el 22/10/2026) con pragma exacto; un repaso de seguridad del 06/11/2026 la da como la única versión sin errores conocidos (26/11/2026). https://guardian.security/blog/which-solidity-version-to-use/
 - OpenZeppelin Contracts: la versión auditada que instala npm es la 5.6.1 (26/11/2026). https://docs.openzeppelin.com/contracts/5.x
+- Librería `@openzeppelin/merkle-tree` 1.0.8, para armar la foto de saldos: las hojas llevan doble hash y van ordenadas, que es lo que espera `Venta`. Comprobado con un test que arma la foto con la librería y compra con sus pruebas (26/11/2026). https://github.com/OpenZeppelin/merkle-tree
 - Hardhat 3 es estable; versión instalada 3.23.0; pide Node.js 22.13 o posterior (26/11/2026). https://hardhat.org/docs/getting-started
 
 ## Antes de mainnet
 
 - Auditoría externa de los contratos. Punto central: que ningún Mercado pueda mover un NFT sin permiso de su dueño.
 - Probar todo contra el USDT0 real en una copia de la red, incluido qué pasa si el emisor bloquea a un comprador, a la tesorería o a los contratos.
-- Tomar las decisiones abiertas de la revisión independiente de `Prenda`.
+- Tomar las decisiones abiertas de la revisión independiente de `Prenda` y repasar con el dueño las que dicen "a confirmar".
 - Confirmar el objetivo de EVM con un despliegue de prueba en la testnet de eSpace.
+- Escribir el módulo de despliegue de mainnet, con su propia llave: USDT0 real, administración aparte, demora de apertura de 24 horas sin parámetro y direcciones de tesorería, operador y pausa definidas.
+- Vigilar los avisos de la cadena: drops nuevos (para compararlos con el catálogo), cambios de administración, de tesorería, de módulos y de Mercados. Con la llave de pausa a mano para frenar todo mientras la administración cierra un drop.
+- Decidir si retirar un módulo de venta tiene que ser para siempre, como apagar un Mercado.
 - Revisión legal y contable del modelo, términos y condiciones y política de privacidad.
 
 ## Reglas técnicas de este proyecto
@@ -208,12 +251,12 @@ npx hardhat test
 
 `npx hardhat build` compila los contratos y `npx tsc --noEmit` revisa los tipos. `npx hardhat test solidity --test-profile deep` es la corrida larga de tests, con muchos más casos al azar.
 
-Para probar el despliegue en una red simulada: `npx hardhat ignition deploy ignition/modules/Testnet.ts`. Ese módulo es solo para redes de prueba: despliega un token de prueba y deja a la cuenta que despliega como administración.
+Para probar el despliegue en una red simulada: `npx hardhat ignition deploy ignition/modules/Testnet.ts`. Ese módulo es solo para redes de prueba: despliega un token de prueba y deja a la cuenta que despliega como administración. La única red configurada es la testnet de Conflux eSpace (`--network confluxESpaceTestnet`).
 
 Si la máquina no puede descargar el compilador de Solidity, se puede indicar uno local con la variable `ALLKA_SOLC_PATH` (binario nativo o `soljson.js` de la versión 0.8.38).
 
 ## Próximos pasos
 
-1. Revisión de seguridad independiente de `Venta` y `Mercado`, y de los tres contratos juntos.
-2. Respuestas del dueño a las decisiones "a confirmar" y a las protecciones que propuso la revisión de `Prenda`.
-3. Despliegue en la testnet de Conflux eSpace y verificación en ConfluxScan.
+1. Revisión independiente de lo que cambió después de las dos primeras: las cuatro protecciones de `Prenda`, la cuenta de permisos quitados, el cierre de drops y las demás correcciones.
+2. Despliegue en la testnet de Conflux eSpace, desde la computadora del dueño, y verificación en ConfluxScan.
+3. Aprobación de la Fase 1 por el dueño.

@@ -12,7 +12,7 @@ Cada prenda única de allka es un NFT. El NFT es el derecho a reclamar la pieza 
 
 1. **Venta primaria.** Se compra el NFT de una prenda con USDT0.
 2. **Mercado de reventa.** El dueño de un NFT sin reclamar lo publica a su precio y otro usuario lo compra en el mismo sitio.
-3. **Reclamo.** Se quema el NFT, se cargan los datos de envío y se recibe la prenda.
+3. **Reclamo.** Se cargan los datos de envío, se quema el NFT y se recibe la prenda.
 
 ## Cómo está hecho
 
