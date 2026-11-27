@@ -25,6 +25,10 @@ These are the properties the tests and the future audit should hold the contract
 
 - No contract ever holds funds. Payments go straight from the buyer to the recipient.
 - No Market, current or future, can move an NFT without its owner's approval.
+- Only the owner of an NFT can claim its garment, and only the owner can give someone permission over it.
 - The terms of a drop (price, storage rules) cannot be made worse for holders after it is created.
+- A buyer names the drop and the price they saw. The purchase goes through only under those terms.
+- A resale offer stops for good when it expires, when the NFT changes hands, when the seller takes back from the Market the permission over all their NFTs, or when the permission over that NFT is taken back. It never comes back to life.
+- Storage fees can only go down after a sale, and a waiver reaches at most two years ahead of the moment it is given.
 - A burned NFT number is never sold again.
 - Private keys never live in this repository.

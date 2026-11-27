@@ -11,8 +11,8 @@ Una tienda con mercado de reventa donde cada prenda única de allka es un NFT en
 | Pieza | Qué hace |
 |---|---|
 | Contrato Prenda (NFT) | Es el contrato permanente. Un NFT por cada prenda física, con su talle. Guarda las reglas de guarda de cada drop y hace el reclamo: al reclamar, el NFT se quema. |
-| Contrato Venta | Los drops: precio en USDT0, fecha de apertura y entrada anticipada para holders de $FGM. Cobra y entrega el NFT en el mismo paso. |
-| Contrato Mercado | La reventa: el dueño publica un precio y otro usuario compra. Reparte el pago en el momento: 98% al vendedor, 2% a FGM. |
+| Contrato Venta | Los drops: cada prenda con su precio en USDT0, fecha de apertura y entrada anticipada para holders de $FGM. Cobra y entrega el NFT en el mismo paso. |
+| Contrato Mercado | La reventa: el dueño publica un precio y otro usuario compra. Reparte el pago en el momento: 98% al vendedor, 2% a FGM. Las ofertas vencen. Nadie lo administra. |
 | Sitio web | Next.js en Vercel, en inglés y español, pensado primero para celular. Pantallas: drops, prenda, mercado, mi colección, reclamar. |
 | Servidor y base de datos | Guarda el catálogo (fotos, talles) y los datos de envío y de factura, que se piden recién al reclamar. |
 | Panel de administración | Cargar drops sin tocar código, ver los reclamos por despachar y marcar los envíos. |
@@ -23,8 +23,9 @@ Venta y Mercado son módulos que se pueden sumar o reemplazar. Prenda no se reem
 
 - Venta primaria: el USDT0 va directo de la billetera del comprador a la tesorería de FGM. No hay escrow y ningún contrato retiene fondos.
 - Reventa: el USDT0 va directo del comprador al vendedor (98%) y a la tesorería (2%). La comisión es fija en este Mercado: nadie puede subirla.
-- Guarda: el período gratis se cuenta desde la venta original. Después se suma una cuota por cada 30 días cumplidos, hasta un máximo fijado en el drop. La paga quien reclama. Ejemplo: con 6 meses gratis, quien reclama en el mes 8 paga 2 cuotas. El derecho a la prenda no vence.
-- FGM puede perdonar guarda, nunca subirla.
+- Guarda: el período gratis se cuenta desde la venta original. Después se suma una cuota por cada 30 días cumplidos, hasta un máximo fijado en el drop. La paga quien reclama. Ejemplo: con 6 meses gratis, quien reclama cuando se cumplen 8 meses paga 2 cuotas; a los 7 meses y medio paga 1. El derecho a la prenda no vence.
+- FGM puede perdonar guarda dándole más tiempo gratis a una prenda. Nunca puede subirla ni acortar el tiempo gratis.
+- La guarda se cobra siempre en la misma moneda (USDT0). No se puede cambiar por otra.
 
 ## Entrada anticipada para holders de $FGM
 
@@ -36,33 +37,44 @@ Toda prenda está terminada, etiquetada con el número de su NFT y guardada ante
 
 ## Los cuatro recorridos
 
-1. Comprar: conectar la billetera, autorizar el monto exacto en USDT0 y comprar. El comprador indica el precio que espera pagar; si cambió, la compra no se hace.
-2. Revender: la primera vez el dueño le da permiso al Mercado sobre sus NFT; después publica un precio. Cuando otro usuario paga, el NFT cambia de dueño.
-3. Reclamar: el sitio revisa antes que se pueda enviar a ese país. El dueño paga la guarda si corresponde y el NFT se quema. El pedido se crea solo a partir de esa quema en la cadena, y los datos de envío valen solo si los firma la misma billetera que quemó. Se pueden corregir hasta el despacho.
-4. Cargar un drop: completar el formulario del panel, revisar los valores que el panel muestra de vuelta y firmar. El drop abre como mínimo 24 horas después y se puede cancelar antes de abrir.
+1. Comprar: conectar la billetera, autorizar el monto exacto en USDT0 y comprar. El comprador indica el drop en el que vio la prenda y el precio que espera pagar; si algo cambió, la compra no se hace.
+2. Revender: la primera vez el dueño le da permiso al Mercado sobre sus NFT; después publica un precio y hasta cuándo vale la oferta (30 días como máximo). Cuando otro usuario paga, el NFT cambia de dueño. El comprador indica el precio que espera pagar; si el vendedor lo cambió, la compra no se hace. Una oferta deja de valer si vence, si el NFT cambia de manos, si el dueño le quita al Mercado el permiso sobre todos sus NFT (caen todas sus ofertas en ese Mercado) o si le quita el permiso de ese NFT (cae solo esa oferta). No revive: para volver a vender hay que publicar de nuevo.
+3. Reclamar: el sitio revisa antes que se pueda enviar a ese país y toma los datos de envío, que quedan guardados con un número de pedido. El dueño paga la guarda si corresponde y el NFT se quema nombrando ese número de pedido. El pedido se confirma solo a partir de esa quema en la cadena. Los datos se pueden corregir hasta el despacho, con la firma de la misma billetera que quemó.
+4. Cargar un drop: completar el formulario del panel, revisar los valores que el panel muestra de vuelta y firmar. El drop abre como mínimo 24 horas después: el contrato no acepta menos, salvo en la testnet, donde se usa una demora corta para probar. Una vez cargado no se puede cambiar, pero se puede cerrar en cualquier momento, antes o después de abrir: lo que ya se vendió queda vendido y lo que no se vendió deja de estar en venta y puede ir a un drop nuevo.
 
 ## Transferencias
 
 El NFT solo cambia de dueño a través de un Mercado autorizado, y siempre con permiso de su dueño: ningún Mercado, ni actual ni futuro, puede mover un NFT que su dueño no le haya autorizado. Hay un interruptor de una sola vía para liberar las transferencias más adelante.
 
+Los permisos son más estrictos que en un NFT común, para que estas reglas no dependan de cómo esté hecho cada Mercado:
+
+- Solo el dueño da permisos. Un Mercado no puede pasarle a otro el permiso que recibió.
+- Mientras las transferencias estén cerradas, solo se le puede dar permiso a un Mercado autorizado. Así no se juntan permisos a terceros que empezarían a valer el día que se liberen.
+- Un Mercado apagado pierde todos los permisos que tenía.
+- El contrato cuenta los permisos que se quitan, en dos cuentas: cuántas veces un dueño le quitó a alguien el permiso sobre todos sus NFT, y cuántas veces se le quitó a alguien el permiso de un NFT puntual. Con esas cuentas, el Mercado descarta las ofertas que quedaron sin el permiso con el que se hicieron, aunque después se vuelva a dar.
+
 Límites que conviene saber: el candado no impide que alguien venda su billetera entera, y quien tenga la billetera comprometida no puede pasar el NFT a otra (solo venderlo o reclamar la prenda).
 
 ## Qué puede hacer FGM después de vender
 
-- Pausar compras y reventa en una emergencia. Los reclamos no se pausan.
+- Pausar compras y reventa en una emergencia. Los reclamos no se pausan. También puede pausar una llave de uso diario que no puede hacer nada más; reanudar lo hace solo la administración.
+- Cerrar un drop, antes o después de que abra. No toca lo que ya se vendió.
+- Sumar un módulo de Venta nuevo o retirar uno.
 - Autorizar un Mercado nuevo o apagar para siempre uno que falle.
 - Liberar las transferencias (no se puede deshacer).
-- Cambiar la dirección de la tesorería.
-- Perdonar guarda.
+- Proponer una tesorería nueva. El cambio vale recién cuando la tesorería nueva lo confirma desde su propia billetera, así una dirección que nadie controla nunca recibe la plata. Si la dirección está mal escrita pero es de alguien, esa persona sí podría confirmarla: antes de confirmar hay que revisarla.
+- Perdonar guarda, a una prenda o a todas a la vez, hasta dos años hacia adelante cada vez. Se puede renovar.
+- Cambiar la dirección web desde donde se sirven las fotos y los datos de los NFT. El contenido no cambia sin que se note: queda sellado con su huella.
 
-Lo que no puede: cambiar el precio de un drop ya creado, subirle la guarda, mover un NFT ajeno, ni volver a vender un número de NFT ya usado.
+Lo que no puede: cambiar el precio de un drop ya creado, subirle la guarda, cambiar la moneda en que se cobra, mover un NFT ajeno, reclamar la prenda de otro, ni volver a vender un número de NFT ya usado.
 
 ## Seguridad
 
-- Tres direcciones de FGM: operador (carga drops; no puede cambiar a dónde va la plata), tesorería (recibe los USDT0) y administración (los interruptores de la lista anterior; guardada y sin uso diario).
+- Cuatro direcciones de FGM: operador (carga drops; no puede cambiar a dónde va la plata), tesorería (recibe los USDT0), administración (los interruptores de la lista anterior; guardada y sin uso diario) y pausa (solo puede pausar).
 - El contrato rechaza precios por debajo de un mínimo y guardas por encima de un máximo, para que un error de carga no regale un drop.
 - Los contratos solo cobran de quien hace la operación y nunca tienen saldo.
-- USDT0 lo controla su emisor, que puede bloquear direcciones y actualizar el token. Por eso la tesorería se puede cambiar y un reclamo sin guarda no toca el token. Antes de mainnet se prueba todo contra el USDT0 real en una copia de la red.
+- USDT0 lo controla su emisor, que puede bloquear direcciones y actualizar el token. Por eso la tesorería se puede cambiar y un reclamo sin guarda no toca el token. Límite conocido: si el emisor bloqueara la dirección del contrato de las prendas, los reclamos con guarda quedan frenados hasta que FGM la perdone, cosa que puede hacer para todas las prendas en un solo paso; los reclamos sin guarda siguen funcionando. Como cada perdón llega como mucho a dos años, mientras dure el bloqueo hay que renovarlo antes de que venza (decisión abierta antes de mainnet: si conviene una salida permanente). Antes de mainnet se prueba todo contra el USDT0 real en una copia de la red.
+- Solo se pueden sumar módulos de Venta y Mercados hechos para este contrato. La administración no puede registrar otra dirección por error, ni usar el apagado de Mercados para bloquear billeteras o contratos ajenos.
 - El servidor despacha solo cuando la quema quedó firme en la cadena (finalizada).
 - Datos personales: los mínimos, cifrados, panel con doble factor, se borran después de la entrega y nada va a la cadena.
 - Las fotos y los datos de cada NFT quedan sellados con una huella al crear el drop.

@@ -1,0 +1,347 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.38;
+
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
+import {Prenda} from "./Prenda.sol";
+
+/**
+ * @title Venta
+ * @notice First sale of the garments of Allka Archivo. Garments go on sale in drops. Each garment has its own
+ * number, which is the id of its NFT, and its own price. Buying sends the price straight from the buyer to the
+ * treasury and creates the NFT for the buyer in the same transaction: this contract never holds money.
+ *
+ * A drop cannot be changed once it is created. It opens no sooner than {openingDelay} after its creation, so that
+ * a mistake or an abuse can be noticed in time; outside test networks that delay is at least 24 hours. A drop can
+ * be closed at any moment, before or after it opens: what it had not sold stops being on sale, and those garments
+ * can go into a new drop.
+ *
+ * A drop can open first for the wallets of a snapshot (the holders of $FGM at a moment chosen before the drop).
+ * During that early window each of those wallets can buy one garment. After it, anyone can buy.
+ *
+ * Who does what:
+ * - The operator creates and closes drops. It cannot decide where the money goes.
+ * - The administration is the administration of {Prenda}. It names the operator and can close a drop too.
+ * - The treasury, the payment token and the pause are those of {Prenda}.
+ */
+contract Venta {
+    using SafeERC20 for IERC20;
+
+    /// @notice A garment of a new drop, as the operator gives it.
+    /// @param tokenId Number of the garment and id of its NFT.
+    /// @param price Price in payment token units.
+    /// @param contentHash Fingerprint of the data of the NFT (photos, size, description).
+    struct NewItem {
+        uint256 tokenId;
+        uint80 price;
+        bytes32 contentHash;
+    }
+
+    /**
+     * @notice A drop.
+     * @param earlyStart When the wallets of the snapshot can start buying. Equal to `publicStart` if the drop has
+     * no early window.
+     * @param publicStart When anyone can start buying.
+     * @param freePeriod Seconds of free storage for each garment, counted from its sale.
+     * @param feePerPeriod Storage fee added for every full 30 days after the free period.
+     * @param closed True once the drop was closed. Nothing more can be bought from it.
+     * @param maxFee Ceiling of the storage fee.
+     * @param earlyRoot Merkle root of the snapshot. Zero if the drop has no early window.
+     */
+    struct Drop {
+        uint48 earlyStart;
+        uint48 publicStart;
+        uint32 freePeriod;
+        uint80 feePerPeriod;
+        bool closed;
+        uint80 maxFee;
+        bytes32 earlyRoot;
+    }
+
+    /// @dev What is recorded for a garment that was put on sale. `dropId` is zero if it never was.
+    struct Item {
+        uint32 dropId;
+        uint80 price;
+        bool sold;
+    }
+
+    /// @notice Shortest {openingDelay} this contract can be deployed with outside test networks.
+    uint48 public constant MIN_OPENING_DELAY = 24 hours;
+
+    /// @dev The two networks where a shorter delay is allowed, so that drops can be tried without waiting a day:
+    /// the testnet of Conflux eSpace and the local simulated network of the development tools.
+    uint256 private constant CONFLUX_ESPACE_TESTNET = 71;
+    uint256 private constant LOCAL_SIMULATED_NETWORK = 31337;
+
+    /// @notice The NFT contract. Its treasury receives the money and its administration is this contract's.
+    Prenda public immutable prenda;
+
+    /// @notice Token in which garments are paid. The same one {Prenda} uses for the storage fee.
+    IERC20 public immutable paymentToken;
+
+    /// @notice Shortest time between the creation of a drop and its opening.
+    uint48 public immutable openingDelay;
+
+    /// @notice Lowest price a garment can have. A guard against a price typed with the wrong number of zeros.
+    uint80 public immutable minPrice;
+
+    /// @notice Highest ceiling a drop can set for the storage fee.
+    uint80 public immutable maxStorageFee;
+
+    /// @notice Account that creates and closes drops.
+    address public operator;
+
+    /// @notice Number of drops ever created. Drop ids go from 1 to this number.
+    uint32 public dropCount;
+
+    /// @notice Whether `account` already bought its garment in the early window of a drop.
+    mapping(uint32 dropId => mapping(address account => bool)) public boughtEarly;
+
+    mapping(uint32 dropId => Drop) private _drops;
+    mapping(uint256 tokenId => Item) private _items;
+    mapping(uint256 tokenId => bytes32) private _contentHashes;
+
+    event DropCreated(
+        uint32 indexed dropId,
+        uint48 earlyStart,
+        uint48 publicStart,
+        bytes32 earlyRoot,
+        uint32 freePeriod,
+        uint80 feePerPeriod,
+        uint80 maxFee
+    );
+    event ItemAdded(uint32 indexed dropId, uint256 indexed tokenId, uint80 price, bytes32 contentHash);
+    event DropClosed(uint32 indexed dropId);
+
+    /// @notice `buyer` paid `price` for a garment. `early` tells whether it was during the early window.
+    event Purchased(uint32 indexed dropId, uint256 indexed tokenId, address indexed buyer, uint80 price, bool early);
+
+    event OperatorChanged(address indexed previousOperator, address indexed newOperator);
+
+    error ZeroMinimumPrice();
+    error OpeningDelayTooShort(uint48 openingDelay, uint48 minimumAllowed);
+    error NotOperator(address caller);
+    error NotAdmin(address caller);
+    error NotOperatorOrAdmin(address caller);
+    error EmptyDrop();
+    error OpensTooSoon(uint48 earlyStart, uint256 earliestAllowed);
+    error InvalidDates(uint48 earlyStart, uint48 publicStart);
+    error InvalidStorageTerms(uint80 feePerPeriod, uint80 maxFee);
+    error StorageFeeAboveMaximum(uint80 maxFee, uint80 maximumAllowed);
+    error PriceBelowMinimum(uint256 tokenId, uint80 price, uint80 minimumAllowed);
+    error EmptyContentHash(uint256 tokenId);
+    error TokenIdNotAvailable(uint256 tokenId);
+    error UnknownDrop(uint32 dropId);
+    error DropAlreadyClosed(uint32 dropId);
+    error NotOnSale(uint256 tokenId);
+    error DropNotAsExpected(uint256 tokenId, uint32 dropId, uint32 expectedDropId);
+    error AlreadySold(uint256 tokenId);
+    error NotOpenYet(uint256 tokenId, uint48 opensAt);
+    error PriceNotAsExpected(uint256 tokenId, uint80 price, uint256 expectedPrice);
+    error NotInSnapshot(address buyer);
+    error EarlyPurchaseAlreadyMade(address buyer);
+
+    /**
+     * @param prenda_ The NFT contract.
+     * @param operator_ Account that creates and closes drops.
+     * @param openingDelay_ Shortest time between creating a drop and its opening. At least {MIN_OPENING_DELAY},
+     * except on the two test networks, where it can be shorter.
+     * @param minPrice_ Lowest price a garment can have. Not zero.
+     * @param maxStorageFee_ Highest ceiling a drop can set for the storage fee.
+     */
+    constructor(Prenda prenda_, address operator_, uint48 openingDelay_, uint80 minPrice_, uint80 maxStorageFee_) {
+        if (minPrice_ == 0) revert ZeroMinimumPrice();
+        if (
+            openingDelay_ < MIN_OPENING_DELAY &&
+            block.chainid != CONFLUX_ESPACE_TESTNET &&
+            block.chainid != LOCAL_SIMULATED_NETWORK
+        ) revert OpeningDelayTooShort(openingDelay_, MIN_OPENING_DELAY);
+        prenda = prenda_;
+        paymentToken = prenda_.paymentToken();
+        openingDelay = openingDelay_;
+        minPrice = minPrice_;
+        maxStorageFee = maxStorageFee_;
+        _setOperator(operator_);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Buyers
+    // ------------------------------------------------------------------------------------------------------------
+
+    /**
+     * @notice Buys a garment: pays its price to the treasury and receives its NFT. The caller must have approved
+     * this contract to take the price in payment token.
+     * @param tokenId Number of the garment.
+     * @param dropId The drop the buyer saw the garment in. A drop cannot be changed, so naming it fixes the
+     * storage rules and the data of the garment the buyer agreed to. The purchase fails if the garment is now on
+     * sale in another drop.
+     * @param expectedPrice The price the buyer saw. The purchase fails if it is not the price of the garment.
+     * @param earlyProof Merkle proof that the caller is in the snapshot of the drop. Only used during the early
+     * window; empty otherwise.
+     */
+    function buy(uint256 tokenId, uint32 dropId, uint256 expectedPrice, bytes32[] calldata earlyProof) external {
+        Item memory item = _items[tokenId];
+        Drop storage drop = _drops[item.dropId];
+        if (item.dropId == 0 || drop.closed) revert NotOnSale(tokenId);
+        if (item.dropId != dropId) revert DropNotAsExpected(tokenId, item.dropId, dropId);
+        if (item.sold) revert AlreadySold(tokenId);
+        if (block.timestamp < drop.earlyStart) revert NotOpenYet(tokenId, drop.earlyStart);
+        if (item.price != expectedPrice) revert PriceNotAsExpected(tokenId, item.price, expectedPrice);
+
+        address buyer = msg.sender;
+        bool early = block.timestamp < drop.publicStart;
+        if (early) {
+            if (boughtEarly[item.dropId][buyer]) revert EarlyPurchaseAlreadyMade(buyer);
+            bytes32 leaf = keccak256(bytes.concat(keccak256(abi.encode(buyer))));
+            if (!MerkleProof.verifyCalldata(earlyProof, drop.earlyRoot, leaf)) revert NotInSnapshot(buyer);
+            boughtEarly[item.dropId][buyer] = true;
+        }
+
+        _items[tokenId].sold = true;
+        emit Purchased(item.dropId, tokenId, buyer, item.price, early);
+
+        // Everything the NFT is created with is read before the payment token is called: whatever happens during
+        // the payment, the buyer gets the storage rules and the data of the drop they named.
+        Prenda.StorageTerms memory terms = Prenda.StorageTerms({
+            freePeriod: drop.freePeriod,
+            feePerPeriod: drop.feePerPeriod,
+            maxFee: drop.maxFee
+        });
+        bytes32 contentHash = _contentHashes[tokenId];
+
+        // Money first, NFT second, both in this transaction: if either fails, nothing happened.
+        paymentToken.safeTransferFrom(buyer, prenda.treasury(), item.price);
+        prenda.mint(buyer, tokenId, terms, contentHash);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Operator
+    // ------------------------------------------------------------------------------------------------------------
+
+    /**
+     * @notice Creates a drop. Nothing in it can be changed afterwards; it can only be closed.
+     * @param earlyStart When the wallets of the snapshot can start buying. At least {openingDelay} from now.
+     * @param publicStart When anyone can start buying. Later than `earlyStart` if there is a snapshot, equal to it
+     * if there is none.
+     * @param earlyRoot Merkle root of the snapshot, built from the addresses with the standard double hash of
+     * OpenZeppelin's merkle-tree library. Zero for a drop without early window.
+     * @param storageTerms Storage rules of every garment of the drop.
+     * @param items Garments of the drop. Their numbers must never have been used and must not be in another drop,
+     * unless that drop was closed.
+     */
+    function createDrop(
+        uint48 earlyStart,
+        uint48 publicStart,
+        bytes32 earlyRoot,
+        Prenda.StorageTerms calldata storageTerms,
+        NewItem[] calldata items
+    ) external returns (uint32 dropId) {
+        if (msg.sender != operator) revert NotOperator(msg.sender);
+        if (items.length == 0) revert EmptyDrop();
+        uint256 earliestAllowed = block.timestamp + openingDelay;
+        if (earlyStart < earliestAllowed) revert OpensTooSoon(earlyStart, earliestAllowed);
+        if (earlyRoot == bytes32(0) ? publicStart != earlyStart : publicStart <= earlyStart) {
+            revert InvalidDates(earlyStart, publicStart);
+        }
+        if (
+            storageTerms.feePerPeriod == 0 ? storageTerms.maxFee != 0 : storageTerms.maxFee < storageTerms.feePerPeriod
+        ) revert InvalidStorageTerms(storageTerms.feePerPeriod, storageTerms.maxFee);
+        if (storageTerms.maxFee > maxStorageFee) revert StorageFeeAboveMaximum(storageTerms.maxFee, maxStorageFee);
+
+        dropId = ++dropCount;
+        _drops[dropId] = Drop({
+            earlyStart: earlyStart,
+            publicStart: publicStart,
+            freePeriod: storageTerms.freePeriod,
+            feePerPeriod: storageTerms.feePerPeriod,
+            closed: false,
+            maxFee: storageTerms.maxFee,
+            earlyRoot: earlyRoot
+        });
+        emit DropCreated(
+            dropId,
+            earlyStart,
+            publicStart,
+            earlyRoot,
+            storageTerms.freePeriod,
+            storageTerms.feePerPeriod,
+            storageTerms.maxFee
+        );
+
+        for (uint256 i = 0; i < items.length; ++i) {
+            NewItem calldata item = items[i];
+            if (item.price < minPrice) revert PriceBelowMinimum(item.tokenId, item.price, minPrice);
+            if (item.contentHash == bytes32(0)) revert EmptyContentHash(item.tokenId);
+            if (!_isAvailable(item.tokenId)) revert TokenIdNotAvailable(item.tokenId);
+
+            _items[item.tokenId] = Item({dropId: dropId, price: item.price, sold: false});
+            _contentHashes[item.tokenId] = item.contentHash;
+            emit ItemAdded(dropId, item.tokenId, item.price, item.contentHash);
+        }
+    }
+
+    /**
+     * @notice Closes a drop for good, whether it has opened or not: nothing more can be bought from it. The
+     * garments it already sold are not affected. The ones it did not sell can go into a new drop, which has to
+     * wait {openingDelay} like any other. The operator and the administration can close a drop.
+     */
+    function closeDrop(uint32 dropId) external {
+        if (msg.sender != operator && msg.sender != prenda.owner()) revert NotOperatorOrAdmin(msg.sender);
+        if (dropId == 0 || dropId > dropCount) revert UnknownDrop(dropId);
+        Drop storage drop = _drops[dropId];
+        if (drop.closed) revert DropAlreadyClosed(dropId);
+
+        drop.closed = true;
+        emit DropClosed(dropId);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Administration
+    // ------------------------------------------------------------------------------------------------------------
+
+    /// @notice Names the account that creates and closes drops. The zero address leaves nobody in that role.
+    function setOperator(address newOperator) external {
+        if (msg.sender != prenda.owner()) revert NotAdmin(msg.sender);
+        _setOperator(newOperator);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Views
+    // ------------------------------------------------------------------------------------------------------------
+
+    /// @notice The drop with that id. All zero if it does not exist.
+    function dropOf(uint32 dropId) external view returns (Drop memory) {
+        return _drops[dropId];
+    }
+
+    /**
+     * @notice What is recorded for a garment: the last drop it was put in (zero if none), its price there, whether
+     * it was sold and the fingerprint of its data.
+     */
+    function itemOf(
+        uint256 tokenId
+    ) external view returns (uint32 dropId, uint80 price, bool sold, bytes32 contentHash) {
+        Item storage item = _items[tokenId];
+        return (item.dropId, item.price, item.sold, _contentHashes[tokenId]);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Internal
+    // ------------------------------------------------------------------------------------------------------------
+
+    /**
+     * @dev A number can go on sale if it is in no drop, or only in a drop that was closed, if this module did not
+     * sell it and if no NFT ever had it. The module's own record of the sale also covers a garment that is being
+     * paid for at this very moment, whose NFT does not exist yet.
+     */
+    function _isAvailable(uint256 tokenId) private view returns (bool) {
+        Item storage item = _items[tokenId];
+        return (item.dropId == 0 || _drops[item.dropId].closed) && !item.sold && !prenda.isTokenIdUsed(tokenId);
+    }
+
+    function _setOperator(address newOperator) private {
+        emit OperatorChanged(operator, newOperator);
+        operator = newOperator;
+    }
+}

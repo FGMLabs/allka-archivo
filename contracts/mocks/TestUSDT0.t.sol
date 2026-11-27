@@ -16,6 +16,27 @@ contract TestUSDT0Test is Test {
         assertEq(token.decimals(), 6);
     }
 
+    /// @dev The test deployment starts with this token. If it can only exist on test networks, the same goes for
+    /// everything that deployment creates. 1030 is Conflux eSpace mainnet and 1029 Conflux Core mainnet.
+    function test_RevertWhen_DeployedOutsideTheTwoTestNetworks() public {
+        uint256[6] memory chains = [uint256(1030), 1029, 1, 56, 70, 72];
+
+        for (uint256 i = 0; i < chains.length; i++) {
+            vm.chainId(chains[i]);
+            vm.expectRevert(abi.encodeWithSelector(TestUSDT0.OnlyForTestNetworks.selector, chains[i]));
+            new TestUSDT0();
+        }
+    }
+
+    /// @dev The testnet of Conflux eSpace (71) and the local simulated network (31337, where these tests run).
+    function test_DeploysOnTheTwoTestNetworks() public {
+        assertEq(block.chainid, 31337);
+        assertEq(new TestUSDT0().totalSupply(), 0);
+
+        vm.chainId(71);
+        assertEq(new TestUSDT0().totalSupply(), 0);
+    }
+
     function test_StartsWithNoSupply() public view {
         assertEq(token.totalSupply(), 0);
     }

@@ -12,7 +12,7 @@ Each one-of-a-kind allka garment is an NFT. The NFT is the right to claim the ph
 
 1. **Primary sale.** Buy a garment's NFT with USDT0.
 2. **Resale market.** List an unclaimed NFT at your price; another user buys it on the same site.
-3. **Claim.** Burn the NFT, give your shipping details and receive the garment.
+3. **Claim.** Give your shipping details, burn the NFT and receive the garment.
 
 ## How it is built
 
@@ -54,6 +54,14 @@ You need Node.js 22.13 or later.
 npm install
 npx hardhat test
 ```
+
+That runs every test: unit and fuzz tests of each contract, random sequences of operations over the three contracts together, and the full version 1 journey. The long run, with many more random cases, is:
+
+```bash
+npx hardhat test solidity --test-profile deep
+```
+
+To deploy the contracts to the Conflux eSpace testnet, follow [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md) (step by step, in Spanish).
 
 ## Stack
 
