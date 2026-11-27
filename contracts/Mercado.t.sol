@@ -96,7 +96,8 @@ contract MercadoTest is Test {
         assertEq(listing.price, 0);
         assertEq(listing.expiresAt, 0);
         assertEq(listing.transferCount, 0);
-        assertEq(listing.approvalsRevoked, 0);
+        assertEq(listing.approvalsForAllRevoked, 0);
+        assertEq(listing.tokenApprovalsRevoked, 0);
     }
 
     /// @dev A second authorized market through which NFTs can change hands behind the back of the first.
@@ -149,7 +150,8 @@ contract MercadoTest is Test {
         assertEq(listing.price, PRICE);
         assertEq(listing.expiresAt, expiresAt);
         assertEq(listing.transferCount, 0);
-        assertEq(listing.approvalsRevoked, 0);
+        assertEq(listing.approvalsForAllRevoked, 0);
+        assertEq(listing.tokenApprovalsRevoked, 0);
         // The NFT does not move: it stays with its holder until somebody buys it.
         assertEq(prenda.ownerOf(TOKEN), alice);
     }
@@ -204,17 +206,30 @@ contract MercadoTest is Test {
         assertEq(mercado.listingOf(TOKEN).seller, alice);
     }
 
-    function test_ListRecordsHowManyApprovalsTheSellerTookBack() public {
+    /// @dev The offer records the two counts kept by the NFT contract: approvals for all taken back by the seller
+    /// and approvals of that NFT taken back, each from this market.
+    function test_ListRecordsHowManyApprovalsWereTakenBack() public {
         _sell(alice, TOKEN);
-        _approveMercado(alice);
-        vm.prank(alice);
+        _sell(alice, TOKEN + 1);
+        vm.startPrank(alice);
+        // One approval for all taken back...
+        prenda.setApprovalForAll(address(mercado), true);
         prenda.setApprovalForAll(address(mercado), false);
-        _approveMercado(alice);
+        // ...and two approvals of the first NFT.
+        prenda.approve(address(mercado), TOKEN);
+        prenda.approve(address(0), TOKEN);
+        prenda.approve(address(mercado), TOKEN);
+        prenda.approve(address(0), TOKEN);
+        prenda.setApprovalForAll(address(mercado), true);
 
-        vm.prank(alice);
         mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        mercado.list(TOKEN + 1, PRICE, uint48(start + MAX_DURATION));
+        vm.stopPrank();
 
-        assertEq(mercado.listingOf(TOKEN).approvalsRevoked, 1);
+        assertEq(mercado.listingOf(TOKEN).approvalsForAllRevoked, 1);
+        assertEq(mercado.listingOf(TOKEN).tokenApprovalsRevoked, 2);
+        assertEq(mercado.listingOf(TOKEN + 1).approvalsForAllRevoked, 1);
+        assertEq(mercado.listingOf(TOKEN + 1).tokenApprovalsRevoked, 0);
     }
 
     /// @dev After the NFT left and came back, the seller offers it again and that new offer sells.
@@ -813,7 +828,8 @@ contract MercadoTest is Test {
         _assertNoListing(TOKEN);
     }
 
-    // Taking the approval back from the market withdraws, for good, every offer made under it.
+    // Taking an approval back from the market withdraws offers for good: the approval for all withdraws every offer
+    // of the seller, the approval of one NFT withdraws the offer of that NFT.
 
     function test_RevertWhen_TheSellerTookTheApprovalBack() public {
         _sellAndList(alice, TOKEN, PRICE);
@@ -876,8 +892,9 @@ contract MercadoTest is Test {
         assertEq(prenda.ownerOf(TOKEN + 1), bob);
     }
 
-    /// @dev With an approval for the NFT and an approval for all, taking either one back stops the offer.
-    function test_RevertWhen_TheOfferHadTwoApprovalsAndTheSellerTookOneBack() public {
+    /// @dev With an approval for the NFT and an approval for all, taking the approval for all back stops the
+    /// offers, even though the market could still move both NFTs with their own approvals.
+    function test_RevertWhen_TheOfferHadTwoApprovalsAndTheSellerTookTheOneForAllBack() public {
         _sell(alice, TOKEN);
         _sell(alice, TOKEN + 1);
         vm.startPrank(alice);
@@ -886,7 +903,6 @@ contract MercadoTest is Test {
         prenda.setApprovalForAll(address(mercado), true);
         mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
         mercado.list(TOKEN + 1, PRICE, uint48(start + MAX_DURATION));
-        // The approval for all goes; the market could still move both NFTs with their own approvals.
         prenda.setApprovalForAll(address(mercado), false);
         vm.stopPrank();
         assertEq(prenda.getApproved(TOKEN), address(mercado));
@@ -903,7 +919,33 @@ contract MercadoTest is Test {
         assertEq(prenda.ownerOf(TOKEN + 1), alice);
     }
 
-    /// @dev The same with an offer made under an approval for that NFT only.
+    /// @dev The other way round: the approval of the NFT goes, the approval for all stays. The offer of that NFT
+    /// stops; the offer of the seller's other NFT is not touched.
+    function test_RevertWhen_TheOfferHadTwoApprovalsAndTheSellerTookTheOneOfTheNftBack() public {
+        _sell(alice, TOKEN);
+        _sell(alice, TOKEN + 1);
+        vm.startPrank(alice);
+        prenda.approve(address(mercado), TOKEN);
+        prenda.approve(address(mercado), TOKEN + 1);
+        prenda.setApprovalForAll(address(mercado), true);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        mercado.list(TOKEN + 1, PRICE, uint48(start + MAX_DURATION));
+        prenda.approve(address(0), TOKEN);
+        vm.stopPrank();
+        assertTrue(prenda.isApprovedForAll(alice, address(mercado)));
+        _fundAndApprove(bob, 2 * uint256(PRICE));
+
+        vm.startPrank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.ListingNoLongerValid.selector, TOKEN));
+        mercado.buy(TOKEN, PRICE);
+        mercado.buy(TOKEN + 1, PRICE);
+        vm.stopPrank();
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
+        assertEq(prenda.ownerOf(TOKEN + 1), bob);
+    }
+
+    /// @dev An offer made under an approval for that NFT only: clearing the approval withdraws it for good.
     function test_RevertWhen_TheSellerClearedTheApprovalOfTheNftAndGaveItAgain() public {
         _sell(alice, TOKEN);
         vm.startPrank(alice);
@@ -919,6 +961,147 @@ contract MercadoTest is Test {
         mercado.buy(TOKEN, PRICE);
 
         assertEq(prenda.ownerOf(TOKEN), alice);
+    }
+
+    /// @dev The same when the approval of the NFT went to another market and came back.
+    function test_RevertWhen_TheSellerGaveTheApprovalOfTheNftToAnotherMarketAndBack() public {
+        OpenMarketMock otherMarket = _anotherMarket();
+        _sell(alice, TOKEN);
+        vm.startPrank(alice);
+        prenda.approve(address(mercado), TOKEN);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        prenda.approve(address(otherMarket), TOKEN);
+        prenda.approve(address(mercado), TOKEN);
+        vm.stopPrank();
+        _fundAndApprove(bob, PRICE);
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.ListingNoLongerValid.selector, TOKEN));
+        mercado.buy(TOKEN, PRICE);
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
+    }
+
+    /// @dev The same once transfers are open, where the approval of the NFT can also go to a wallet.
+    function test_RevertWhen_TheSellerGaveTheApprovalOfTheNftToAWalletAndBackAfterTransfersAreOpened() public {
+        _sell(alice, TOKEN);
+        vm.prank(admin);
+        prenda.openTransfers();
+        vm.startPrank(alice);
+        prenda.approve(address(mercado), TOKEN);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        prenda.approve(carol, TOKEN);
+        prenda.approve(address(mercado), TOKEN);
+        vm.stopPrank();
+        _fundAndApprove(bob, PRICE);
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.ListingNoLongerValid.selector, TOKEN));
+        mercado.buy(TOKEN, PRICE);
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
+    }
+
+    /// @dev Taking back the approval of one NFT withdraws the offer of that NFT and no other.
+    function test_TakingBackTheApprovalOfOneNftWithdrawsOnlyTheOfferOfThatNft() public {
+        _sell(alice, TOKEN);
+        _sell(alice, TOKEN + 1);
+        vm.startPrank(alice);
+        prenda.approve(address(mercado), TOKEN);
+        prenda.approve(address(mercado), TOKEN + 1);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        mercado.list(TOKEN + 1, PRICE, uint48(start + MAX_DURATION));
+        prenda.approve(address(0), TOKEN);
+        prenda.approve(address(mercado), TOKEN);
+        vm.stopPrank();
+        _fundAndApprove(bob, 2 * uint256(PRICE));
+
+        vm.startPrank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.ListingNoLongerValid.selector, TOKEN));
+        mercado.buy(TOKEN, PRICE);
+        mercado.buy(TOKEN + 1, PRICE);
+        vm.stopPrank();
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
+        assertEq(prenda.ownerOf(TOKEN + 1), bob);
+    }
+
+    /// @dev An offer made under the approval for all is not touched when the seller clears the approval of
+    /// another of their NFTs.
+    function test_ClearingTheApprovalOfAnotherNftDoesNotTouchTheOffer() public {
+        _sellAndList(alice, TOKEN, PRICE);
+        _sell(alice, TOKEN + 1);
+        vm.startPrank(alice);
+        prenda.approve(address(mercado), TOKEN + 1);
+        prenda.approve(address(0), TOKEN + 1);
+        vm.stopPrank();
+        _fundAndApprove(bob, PRICE);
+
+        vm.prank(bob);
+        mercado.buy(TOKEN, PRICE);
+
+        assertEq(prenda.ownerOf(TOKEN), bob);
+    }
+
+    /// @dev An offer withdrawn by taking the approval back during a pause stays dead after the pause.
+    function test_RevertWhen_TheSellerTookTheApprovalBackAndGaveItAgainDuringAPause() public {
+        _sellAndList(alice, TOKEN, PRICE);
+        vm.prank(admin);
+        prenda.pause();
+        vm.startPrank(alice);
+        prenda.setApprovalForAll(address(mercado), false);
+        prenda.setApprovalForAll(address(mercado), true);
+        vm.stopPrank();
+        vm.prank(admin);
+        prenda.unpause();
+        _fundAndApprove(bob, PRICE);
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.ListingNoLongerValid.selector, TOKEN));
+        mercado.buy(TOKEN, PRICE);
+
+        assertEq(prenda.ownerOf(TOKEN), alice);
+    }
+
+    /// @dev The counts are compared in full: 256 approvals taken back and given again do not bring an offer back.
+    function test_RevertWhen_TheSellerTookTheApprovalBack256Times() public {
+        _sellAndList(alice, TOKEN, PRICE);
+        _sell(alice, TOKEN + 1);
+        vm.startPrank(alice);
+        prenda.approve(address(mercado), TOKEN + 1);
+        mercado.list(TOKEN + 1, PRICE, uint48(start + MAX_DURATION));
+        for (uint256 i = 0; i < 256; i++) {
+            prenda.setApprovalForAll(address(mercado), false);
+            prenda.setApprovalForAll(address(mercado), true);
+        }
+        vm.stopPrank();
+        assertEq(prenda.approvalsForAllRevoked(alice, address(mercado)), 256);
+        _fundAndApprove(bob, PRICE);
+
+        vm.startPrank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.ListingNoLongerValid.selector, TOKEN));
+        mercado.buy(TOKEN, PRICE);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.ListingNoLongerValid.selector, TOKEN + 1));
+        mercado.buy(TOKEN + 1, PRICE);
+        vm.stopPrank();
+    }
+
+    function test_RevertWhen_TheSellerTookTheApprovalOfTheNftBack256Times() public {
+        _sell(alice, TOKEN);
+        vm.startPrank(alice);
+        prenda.approve(address(mercado), TOKEN);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        for (uint256 i = 0; i < 256; i++) {
+            prenda.approve(address(0), TOKEN);
+            prenda.approve(address(mercado), TOKEN);
+        }
+        vm.stopPrank();
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(mercado)), 256);
+        _fundAndApprove(bob, PRICE);
+
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Mercado.ListingNoLongerValid.selector, TOKEN));
+        mercado.buy(TOKEN, PRICE);
     }
 
     /// @dev After taking the approval back, a new approval and a new offer work as on the first day.
@@ -937,17 +1120,96 @@ contract MercadoTest is Test {
         assertEq(prenda.ownerOf(TOKEN), bob);
     }
 
+    /// @dev A seller that had taken approvals back before offers under an approval for one NFT: the offer sells.
+    function test_OfferUnderAnApprovalForOneNftBySellerWhoTookApprovalsBackBeforeSells() public {
+        _sell(alice, TOKEN);
+        vm.startPrank(alice);
+        prenda.setApprovalForAll(address(mercado), true);
+        prenda.setApprovalForAll(address(mercado), false);
+        prenda.approve(address(mercado), TOKEN);
+        prenda.approve(address(0), TOKEN);
+        prenda.approve(address(mercado), TOKEN);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        vm.stopPrank();
+        assertEq(mercado.listingOf(TOKEN).approvalsForAllRevoked, 1);
+        assertEq(mercado.listingOf(TOKEN).tokenApprovalsRevoked, 1);
+        _fundAndApprove(bob, PRICE);
+
+        vm.prank(bob);
+        mercado.buy(TOKEN, PRICE);
+
+        assertEq(prenda.ownerOf(TOKEN), bob);
+    }
+
+    /// @dev An offer made while sales are paused by a seller that had taken approvals back sells after the pause.
+    function test_OfferMadeDuringAPauseBySellerWhoTookApprovalsBackBeforeSells() public {
+        _sell(alice, TOKEN);
+        vm.startPrank(alice);
+        prenda.setApprovalForAll(address(mercado), true);
+        prenda.setApprovalForAll(address(mercado), false);
+        prenda.setApprovalForAll(address(mercado), true);
+        vm.stopPrank();
+        vm.prank(admin);
+        prenda.pause();
+        vm.prank(alice);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        vm.prank(admin);
+        prenda.unpause();
+        _fundAndApprove(bob, PRICE);
+
+        vm.prank(bob);
+        mercado.buy(TOKEN, PRICE);
+
+        assertEq(prenda.ownerOf(TOKEN), bob);
+    }
+
+    /// @dev The count of an NFT follows the NFT: what an earlier holder took back does not weigh on the offers of
+    /// the next one.
+    function test_OfferByANewHolderOfAnNftWhoseApprovalWasOnceTakenBackSells() public {
+        _sell(alice, TOKEN);
+        vm.startPrank(alice);
+        prenda.approve(address(mercado), TOKEN);
+        prenda.approve(address(0), TOKEN);
+        prenda.approve(address(mercado), TOKEN);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        vm.stopPrank();
+        _fundAndApprove(bob, PRICE);
+        vm.prank(bob);
+        mercado.buy(TOKEN, PRICE);
+
+        vm.startPrank(bob);
+        prenda.approve(address(mercado), TOKEN);
+        mercado.list(TOKEN, PRICE, uint48(start + MAX_DURATION));
+        vm.stopPrank();
+        assertEq(mercado.listingOf(TOKEN).tokenApprovalsRevoked, 1);
+        assertEq(mercado.listingOf(TOKEN).approvalsForAllRevoked, 0);
+        _fundAndApprove(carol, PRICE);
+        vm.prank(carol);
+        mercado.buy(TOKEN, PRICE);
+
+        assertEq(prenda.ownerOf(TOKEN), carol);
+    }
+
     /// @dev What the seller does with other markets, or what other holders do with this one, changes nothing.
     function test_ApprovalsTakenBackElsewhereDoNotTouchTheOffer() public {
         _sellAndList(alice, TOKEN, PRICE);
+        _sell(alice, TOKEN + 1);
+        _sell(carol, TOKEN + 2);
         OpenMarketMock otherMarket = _anotherMarket();
         vm.startPrank(alice);
+        // The seller, with another market: the approval for all, and the approval of the NFT on offer.
         prenda.setApprovalForAll(address(otherMarket), true);
         prenda.setApprovalForAll(address(otherMarket), false);
+        prenda.approve(address(otherMarket), TOKEN);
+        prenda.approve(address(0), TOKEN);
         vm.stopPrank();
-        _approveMercado(carol);
-        vm.prank(carol);
+        // Another holder, with this market: the approval for all, and the approval of an NFT of theirs.
+        vm.startPrank(carol);
+        prenda.setApprovalForAll(address(mercado), true);
         prenda.setApprovalForAll(address(mercado), false);
+        prenda.approve(address(mercado), TOKEN + 2);
+        prenda.approve(address(0), TOKEN + 2);
+        vm.stopPrank();
         _fundAndApprove(bob, PRICE);
 
         vm.prank(bob);

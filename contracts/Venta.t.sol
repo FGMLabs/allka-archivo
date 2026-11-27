@@ -162,6 +162,43 @@ contract VentaTest is Test {
         new Venta(prenda, operator, DELAY, 0, MAX_STORAGE);
     }
 
+    /// @dev Outside the two test networks a drop cannot open sooner than a day after it is created: a sale module
+    /// with a shorter wait cannot even be deployed. 1030 is Conflux eSpace mainnet.
+    function test_RevertWhen_TheOpeningDelayIsBelowADayOutsideTestNetworks() public {
+        assertEq(venta.MIN_OPENING_DELAY(), 24 hours);
+        uint256[4] memory chains = [uint256(1030), 1, 1029, 72];
+
+        for (uint256 i = 0; i < chains.length; i++) {
+            vm.chainId(chains[i]);
+            vm.expectRevert(
+                abi.encodeWithSelector(Venta.OpeningDelayTooShort.selector, uint48(24 hours - 1), uint48(24 hours))
+            );
+            new Venta(prenda, operator, 24 hours - 1, MIN_PRICE, MAX_STORAGE);
+            vm.expectRevert(
+                abi.encodeWithSelector(Venta.OpeningDelayTooShort.selector, uint48(10 minutes), uint48(24 hours))
+            );
+            new Venta(prenda, operator, 10 minutes, MIN_PRICE, MAX_STORAGE);
+            vm.expectRevert(abi.encodeWithSelector(Venta.OpeningDelayTooShort.selector, uint48(0), uint48(24 hours)));
+            new Venta(prenda, operator, 0, MIN_PRICE, MAX_STORAGE);
+
+            // Exactly a day, or more, is accepted.
+            assertEq(new Venta(prenda, operator, 24 hours, MIN_PRICE, MAX_STORAGE).openingDelay(), 24 hours);
+            assertEq(new Venta(prenda, operator, 7 days, MIN_PRICE, MAX_STORAGE).openingDelay(), 7 days);
+        }
+    }
+
+    /// @dev On the testnet of Conflux eSpace (71) and on the local simulated network (31337, where these tests
+    /// run) the wait can be shorter, so that a drop can be tried without waiting a day.
+    function test_AShorterOpeningDelayIsAllowedOnTheTwoTestNetworks() public {
+        assertEq(block.chainid, 31337);
+        assertEq(new Venta(prenda, operator, 10 minutes, MIN_PRICE, MAX_STORAGE).openingDelay(), 10 minutes);
+        assertEq(new Venta(prenda, operator, 0, MIN_PRICE, MAX_STORAGE).openingDelay(), 0);
+
+        vm.chainId(71);
+        assertEq(new Venta(prenda, operator, 10 minutes, MIN_PRICE, MAX_STORAGE).openingDelay(), 10 minutes);
+        assertEq(new Venta(prenda, operator, 0, MIN_PRICE, MAX_STORAGE).openingDelay(), 0);
+    }
+
     // ------------------------------------------------------------------------------------------------------------
     // Creating a drop
     // ------------------------------------------------------------------------------------------------------------
@@ -546,6 +583,53 @@ contract VentaTest is Test {
         assertEq(prenda.ownerOf(TOKEN), alice);
         assertEq(prenda.ownerOf(TOKEN + 1), bob);
         assertEq(usdt.balanceOf(treasury), 3 * uint256(PRICE));
+    }
+
+    /// @dev A drop that takes the garments of a closed drop waits the opening delay like any other.
+    function test_RevertWhen_ADropOfRelistedGarmentsOpensTooSoon() public {
+        uint32 first = _createDrop(TOKEN, 2);
+        vm.warp(createdAt + DELAY + 1 hours);
+        vm.startPrank(operator);
+        venta.closeDrop(first);
+
+        uint48 tooSoon = uint48(block.timestamp + DELAY - 1);
+        vm.expectRevert(abi.encodeWithSelector(Venta.OpensTooSoon.selector, tooSoon, block.timestamp + DELAY));
+        venta.createDrop(tooSoon, tooSoon, bytes32(0), _terms(), _items(TOKEN, 2, MIN_PRICE));
+        uint48 rightNow = uint48(block.timestamp);
+        vm.expectRevert(abi.encodeWithSelector(Venta.OpensTooSoon.selector, rightNow, block.timestamp + DELAY));
+        venta.createDrop(rightNow, rightNow, bytes32(0), _terms(), _items(TOKEN, 2, MIN_PRICE));
+        vm.stopPrank();
+    }
+
+    /// @dev A wallet that used its early turn in a drop that was closed has a new turn in the drop the unsold
+    /// garments went into.
+    function test_ARelistedGarmentComesWithNewEarlyTurns() public {
+        uint32 first = _createEarlyDrop(TOKEN, 2);
+        vm.warp(createdAt + DELAY);
+        _fundAndApprove(alice, 2 * uint256(PRICE));
+        bytes32[] memory proof = _proofOf(alice);
+        vm.prank(alice);
+        venta.buy(TOKEN, first, PRICE, proof);
+
+        vm.startPrank(operator);
+        venta.closeDrop(first);
+        uint48 again = uint48(block.timestamp + DELAY);
+        uint32 second = venta.createDrop(
+            again,
+            again + EARLY_WINDOW,
+            _root(),
+            _terms(),
+            _items(TOKEN + 1, 1, PRICE)
+        );
+        vm.stopPrank();
+        vm.warp(again);
+
+        vm.prank(alice);
+        venta.buy(TOKEN + 1, second, PRICE, proof);
+
+        assertEq(prenda.ownerOf(TOKEN + 1), alice);
+        assertTrue(venta.boughtEarly(first, alice));
+        assertTrue(venta.boughtEarly(second, alice));
     }
 
     /// @dev A garment that goes from a closed drop into a new one takes everything from the new one: price,
@@ -1441,6 +1525,28 @@ contract VentaTest is Test {
             vm.expectRevert(abi.encodeWithSelector(Venta.NotAdmin.selector, callers[i]));
             venta.setOperator(callers[i]);
         }
+        assertEq(venta.operator(), operator);
+    }
+
+    /// @dev The account that can only pause the NFT contract cannot close a drop, create one or name the operator.
+    function test_RevertWhen_ThePauserActsOnTheSaleModule() public {
+        address pauser = makeAddr("pauser");
+        vm.prank(admin);
+        prenda.setPauser(pauser);
+        uint32 dropId = _createDrop(TOKEN, 1);
+        uint48 start = uint48(createdAt + DELAY);
+
+        vm.startPrank(pauser);
+        vm.expectRevert(abi.encodeWithSelector(Venta.NotOperatorOrAdmin.selector, pauser));
+        venta.closeDrop(dropId);
+        vm.expectRevert(abi.encodeWithSelector(Venta.NotOperator.selector, pauser));
+        venta.createDrop(start, start, bytes32(0), _terms(), _items(TOKEN + 1, 1, PRICE));
+        vm.expectRevert(abi.encodeWithSelector(Venta.NotAdmin.selector, pauser));
+        venta.setOperator(pauser);
+        vm.stopPrank();
+
+        assertFalse(venta.dropOf(dropId).closed);
+        assertEq(venta.dropCount(), 1);
         assertEq(venta.operator(), operator);
     }
 

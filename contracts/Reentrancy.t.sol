@@ -8,16 +8,17 @@ import {Hashes} from "@openzeppelin/contracts/utils/cryptography/Hashes.sol";
 import {Mercado} from "./Mercado.sol";
 import {Prenda} from "./Prenda.sol";
 import {Venta} from "./Venta.sol";
-import {BuyerAttackerMock, SellerAttackerMock} from "./mocks/AttackerMocks.sol";
+import {BuyerAttackerMock, OperatorTreasuryAttackerMock, SellerAttackerMock} from "./mocks/AttackerMocks.sol";
 import {OpenMarketMock} from "./mocks/OpenMarketMock.sol";
 import {OpenMinterMock} from "./mocks/OpenMinterMock.sol";
 import {HookTokenMock} from "./mocks/PaymentTokenMocks.sol";
 
 /**
- * @notice What a seller or a buyer could do if the payment token handed them control in the middle of a purchase.
- * USDT0 does not do that today, but its issuer can upgrade it. Here the payment token calls the payer and the
- * receiver, before and after the tokens move, and each of them tries everything it can. Every case must end in
- * one of two ways: nothing happened at all, or exactly one payment was made for exactly one NFT.
+ * @notice What a seller, a buyer or the treasury could do if the payment token handed them control in the middle
+ * of a purchase. USDT0 does not do that today, but its issuer can upgrade it. Here the payment token calls the
+ * payer and the receiver, before and after the tokens move, and each of them tries everything it can. Every case
+ * must end in one of two ways: nothing happened at all, or exactly one payment was made for exactly one NFT, the
+ * one the buyer asked for.
  *
  * The moments of a payment are numbered as in ITransferHook: 1 the payer before the tokens move, 2 the receiver
  * before, 3 the payer after, 4 the receiver after.
@@ -324,6 +325,108 @@ contract ReentrancyTest is Test {
             assertEq(s.token.balanceOf(treasury), FEE);
             assertEq(s.token.balanceOf(address(buyer)), PRICE);
             assertEq(s.token.balanceOf(address(s.mercado)), 0);
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // The treasury is also the operator of the sale module and acts while it is being paid
+    // ------------------------------------------------------------------------------------------------------------
+
+    bytes32 internal constant HASH_SEEN = keccak256("the data the buyer saw in drop 1");
+    bytes32 internal constant HASH_OTHER = keccak256("other data, loaded in another drop during the payment");
+
+    /// @dev One account receives the money and loads the drops. It created a drop with one garment, 180 days of
+    /// free storage and a fee of 5 at most 30; alice has the price ready. The account acts at `phase`.
+    function _rogueSetup(
+        uint8 phase,
+        bool quietly
+    ) internal returns (HookTokenMock token, Prenda prenda, Venta venta, OperatorTreasuryAttackerMock rogue) {
+        token = new HookTokenMock();
+        rogue = new OperatorTreasuryAttackerMock();
+        prenda = new Prenda("Allka Archivo", "ALLKA", token, address(rogue), admin, "https://example.test/nft/");
+        venta = new Venta(prenda, address(rogue), DELAY, MIN_PRICE, MAX_STORAGE);
+        vm.prank(admin);
+        prenda.setMinter(address(venta), true);
+
+        uint48 start = uint48(block.timestamp + DELAY);
+        Venta.NewItem[] memory items = new Venta.NewItem[](1);
+        items[0] = Venta.NewItem({tokenId: TOKEN, price: PRICE, contentHash: HASH_SEEN});
+        rogue.createDrop(
+            venta,
+            start,
+            Prenda.StorageTerms({freePeriod: 180 days, feePerPeriod: 5 * 10 ** 6, maxFee: 30 * 10 ** 6}),
+            items
+        );
+        rogue.arm(TOKEN, HASH_OTHER, MIN_PRICE, MAX_STORAGE, phase, quietly);
+        token.setHooked(address(rogue), true);
+
+        vm.warp(start);
+        token.mint(alice, PRICE);
+        vm.prank(alice);
+        token.approve(address(venta), PRICE);
+    }
+
+    /// @dev The garment that is being paid for cannot go into another drop: the purchase is undone as a whole and
+    /// the buyer keeps the money.
+    function test_RevertWhen_TheTreasuryThatIsAlsoOperatorRelistsTheGarmentWhileBeingPaid() public {
+        for (uint8 phase = 2; phase <= 4; phase += 2) {
+            (HookTokenMock token, Prenda prenda, Venta venta, ) = _rogueSetup(phase, false);
+
+            vm.prank(alice);
+            vm.expectRevert(abi.encodeWithSelector(Venta.TokenIdNotAvailable.selector, TOKEN));
+            venta.buy(TOKEN, DROP, PRICE, new bytes32[](0));
+
+            (uint32 dropId, uint80 price, bool sold, bytes32 contentHash) = venta.itemOf(TOKEN);
+            assertEq(dropId, DROP);
+            assertEq(price, PRICE);
+            assertFalse(sold);
+            assertEq(contentHash, HASH_SEEN);
+            assertFalse(venta.dropOf(DROP).closed);
+            assertEq(venta.dropCount(), 1);
+            assertEq(token.balanceOf(alice), PRICE, "the buyer kept the money");
+            assertFalse(prenda.isTokenIdUsed(TOKEN));
+        }
+    }
+
+    /// @dev The same when the attacker swallows the refusal so that the purchase goes on: the buyer gets exactly
+    /// what the drop it named promised. Closing the drop from inside the payment does not change that either.
+    function test_TreasuryThatIsAlsoOperatorCannotChangeWhatTheBuyerGets() public {
+        for (uint8 phase = 2; phase <= 4; phase += 2) {
+            (HookTokenMock token, Prenda prenda, Venta venta, OperatorTreasuryAttackerMock rogue) = _rogueSetup(
+                phase,
+                true
+            );
+
+            vm.prank(alice);
+            venta.buy(TOKEN, DROP, PRICE, new bytes32[](0));
+
+            assertTrue(rogue.hookRan());
+            assertTrue(rogue.closeWorked());
+            assertFalse(rogue.relistWorked());
+            assertEq(rogue.relistError(), abi.encodeWithSelector(Venta.TokenIdNotAvailable.selector, TOKEN));
+
+            // One payment, one NFT, with the data and the storage rules of the drop the buyer named.
+            assertEq(prenda.ownerOf(TOKEN), alice);
+            assertEq(token.balanceOf(address(rogue)), PRICE);
+            assertEq(token.balanceOf(alice), 0);
+            assertEq(prenda.contentHashOf(TOKEN), HASH_SEEN);
+            (uint48 freeUntil, uint80 feePerPeriod, uint80 maxFee) = prenda.storageTermsOf(TOKEN);
+            assertEq(freeUntil, block.timestamp + 180 days);
+            assertEq(feePerPeriod, 5 * 10 ** 6);
+            assertEq(maxFee, 30 * 10 ** 6);
+
+            // The books of the sale module say the same: sold, in the drop the buyer named.
+            (uint32 dropId, uint80 price, bool sold, bytes32 contentHash) = venta.itemOf(TOKEN);
+            assertEq(dropId, DROP);
+            assertEq(price, PRICE);
+            assertTrue(sold);
+            assertEq(contentHash, HASH_SEEN);
+            assertTrue(venta.dropOf(DROP).closed);
+            assertEq(venta.dropCount(), 1);
+
+            // And the garment cannot go into another drop afterwards.
+            vm.expectRevert(abi.encodeWithSelector(Venta.TokenIdNotAvailable.selector, TOKEN));
+            rogue.relist();
         }
     }
 }

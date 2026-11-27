@@ -69,4 +69,23 @@ describe("The deployment module for test networks", async function () {
     // The administration is always the deploying account: the module has no parameter for it.
     assert.equal(getAddress(await prenda.read.owner()), getAddress(deployer.account.address));
   });
+
+  // The test token can only be deployed on the testnet of Conflux eSpace (71) and on the local simulated network
+  // (31337). The module starts with it, so on any other network it stops before it creates anything.
+  for (const chainId of [1030, 1]) {
+    it(`stops at the test token and creates nothing on a network with chain id ${chainId}`, async function () {
+      const { ignition, viem } = await network.create({ override: { chainId } });
+      const publicClient = await viem.getPublicClient();
+      const [deployer] = await viem.getWalletClients();
+      assert.equal(await publicClient.getChainId(), chainId);
+
+      await assert.rejects(ignition.deploy(TestnetModule), (error: Error) => {
+        assert.match(error.message, /OnlyForTestNetworks/);
+        return true;
+      });
+      assert.equal(await publicClient.getTransactionCount({ address: deployer.account.address }), 0);
+      assert.equal(await publicClient.getBlockNumber(), 0n);
+    });
+  }
 });
+

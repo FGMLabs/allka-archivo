@@ -8,8 +8,8 @@ import {Venta} from "../Venta.sol";
 import {OpenMarketMock} from "./OpenMarketMock.sol";
 import {ITransferHook} from "./PaymentTokenMocks.sol";
 
-// Test helpers: a seller and a buyer that are contracts and try everything they can when the payment token hands
-// them control in the middle of a purchase (see HookTokenMock). Never deploy them to a real network.
+// Test helpers: a seller, a buyer and a treasury that are contracts and try everything they can when the payment
+// token hands them control in the middle of a purchase (see HookTokenMock). Never deploy them to a real network.
 
 /// @notice Offers an NFT on the market and, while it is being paid for it, does one thing of its choice.
 contract SellerAttackerMock is ITransferHook {
@@ -207,5 +207,89 @@ contract BuyerAttackerMock is ITransferHook {
         try mercado.list(targetTokenId, 10 * 10 ** 6, uint48(block.timestamp + 1 days)) {
             listWorked = true;
         } catch {}
+    }
+}
+
+/**
+ * @notice An account that is at once the treasury of the NFT contract and the operator of the sale module. While
+ * it is being paid for a garment it closes the drop the buyer is buying from and tries to put that same garment
+ * into a new drop, with another fingerprint, another price and the worst storage rules the module allows.
+ */
+contract OperatorTreasuryAttackerMock is ITransferHook {
+    Venta public venta;
+    uint256 public tokenId;
+    bytes32 public otherHash;
+    uint80 public otherPrice;
+    uint80 public worstFee;
+    uint8 public phase;
+    bool public quietly;
+
+    bool public hookRan;
+    bool public closeWorked;
+    bool public relistWorked;
+    bytes public relistError;
+
+    /// @dev As operator: creates a drop with no early window.
+    function createDrop(
+        Venta venta_,
+        uint48 start,
+        Prenda.StorageTerms calldata terms,
+        Venta.NewItem[] calldata items
+    ) external returns (uint32) {
+        venta = venta_;
+        return venta_.createDrop(start, start, bytes32(0), terms, items);
+    }
+
+    /**
+     * @dev What to put the garment into, and at which moment of the payment (see ITransferHook). With `quietly_`
+     * the attacker swallows a refusal, so that the purchase goes on; without it the refusal undoes the purchase.
+     */
+    function arm(
+        uint256 tokenId_,
+        bytes32 otherHash_,
+        uint80 otherPrice_,
+        uint80 worstFee_,
+        uint8 phase_,
+        bool quietly_
+    ) external {
+        tokenId = tokenId_;
+        otherHash = otherHash_;
+        otherPrice = otherPrice_;
+        worstFee = worstFee_;
+        phase = phase_;
+        quietly = quietly_;
+    }
+
+    function relist() public returns (uint32) {
+        Venta.NewItem[] memory items = new Venta.NewItem[](1);
+        items[0] = Venta.NewItem({tokenId: tokenId, price: otherPrice, contentHash: otherHash});
+        uint48 start = uint48(block.timestamp + venta.openingDelay());
+        return
+            venta.createDrop(
+                start,
+                start,
+                bytes32(0),
+                Prenda.StorageTerms({freePeriod: 0, feePerPeriod: worstFee, maxFee: worstFee}),
+                items
+            );
+    }
+
+    function onTokenHook(uint8 phase_) external {
+        if (phase_ != phase || hookRan) return;
+        hookRan = true;
+        (uint32 current, , , ) = venta.itemOf(tokenId);
+        venta.closeDrop(current);
+        closeWorked = true;
+
+        if (!quietly) {
+            relist();
+            relistWorked = true;
+            return;
+        }
+        try this.relist() {
+            relistWorked = true;
+        } catch (bytes memory reason) {
+            relistError = reason;
+        }
     }
 }

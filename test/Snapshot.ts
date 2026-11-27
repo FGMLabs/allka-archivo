@@ -96,4 +96,34 @@ describe("A snapshot built with OpenZeppelin's merkle-tree library", async funct
     }
     assert.equal(await prenda.read.isTokenIdUsed([lastGarment]), false);
   });
+
+  it("works with a snapshot of a single wallet, whose proof is empty", async function () {
+    const [only, other] = [wallets[12], wallets[13]];
+    const single = StandardMerkleTree.of([[getAddress(only.account.address)]], ["address"]);
+    const emptyProof = single.getProof([getAddress(only.account.address)]) as Hex[];
+    assert.equal(emptyProof.length, 0);
+
+    const start = (await networkHelpers.time.latest()) + 2 * HOUR;
+    const garments = [101n, 102n].map((tokenId) => ({
+      tokenId,
+      price: PRICE,
+      contentHash: `0x${tokenId.toString(16).padStart(64, "0")}` as Hex,
+    }));
+    await venta.write.createDrop([start, start + 6 * HOUR, single.root as Hex, NO_STORAGE_FEE, garments], {
+      account: operator.account,
+    });
+    const dropId = await venta.read.dropCount();
+    await networkHelpers.time.increaseTo(start);
+
+    await fundAndApprove(other);
+    await viem.assertions.revertWithCustomErrorWithArgs(
+      venta.write.buy([102n, dropId, PRICE, []], { account: other.account }),
+      venta,
+      "NotInSnapshot",
+      [getAddress(other.account.address)],
+    );
+    await fundAndApprove(only);
+    await venta.write.buy([101n, dropId, PRICE, emptyProof], { account: only.account });
+    assert.equal(await prenda.read.ownerOf([101n]), getAddress(only.account.address));
+  });
 });

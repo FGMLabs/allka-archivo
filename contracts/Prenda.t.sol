@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.38;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20Errors, IERC721Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -223,6 +223,48 @@ contract PrendaTest is Test {
         assertEq(prenda.transferCountOf(TOKEN), 0);
         assertTrue(prenda.isTokenIdUsed(TOKEN));
         assertEq(prenda.storageFeeOf(TOKEN), 0);
+    }
+
+    /**
+     * @dev The site and the order server read this event, so its layout is part of the permanent interface: the
+     * garment, the buyer and the sale module are the indexed fields, in that order. A test that builds the
+     * expected event from the contract's own declaration cannot notice a change of layout; this one spells it out.
+     */
+    function test_MintedEventHasTheGarmentTheBuyerAndTheModuleAsItsIndexedFields() public {
+        vm.recordLogs();
+        _sell(alice, TOKEN);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        bytes32 signature = keccak256("Minted(uint256,address,address,uint48,uint80,uint80,bytes32)");
+        uint256 found;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter != address(prenda) || logs[i].topics[0] != signature) continue;
+            found += 1;
+            assertEq(logs[i].topics.length, 4, "three indexed fields");
+            assertEq(logs[i].topics[1], bytes32(TOKEN));
+            assertEq(logs[i].topics[2], bytes32(uint256(uint160(alice))));
+            assertEq(logs[i].topics[3], bytes32(uint256(uint160(address(minter)))));
+            assertEq(
+                logs[i].data,
+                abi.encode(uint256(soldAt + FREE_PERIOD), uint256(FEE), uint256(MAX_FEE), CONTENT_HASH)
+            );
+        }
+        assertEq(found, 1);
+    }
+
+    /// @dev What the creation event says for a garment sold under a waiver for all: the garment's own date. The
+    /// date in force is the one `storageTermsOf` reports.
+    function test_MintedEventReportsTheGarmentsOwnDateUnderAWaiverForAll() public {
+        uint48 forAll = uint48(soldAt + 700 days);
+        vm.prank(admin);
+        prenda.extendFreeStorageForAll(forAll);
+
+        vm.expectEmit(address(prenda));
+        emit Prenda.Minted(TOKEN, alice, address(minter), uint48(soldAt + FREE_PERIOD), FEE, MAX_FEE, CONTENT_HASH);
+        _sell(alice, TOKEN);
+
+        (uint48 freeUntil, , ) = prenda.storageTermsOf(TOKEN);
+        assertEq(freeUntil, forAll);
     }
 
     function test_UnusedTokenIdHasNoRecord() public view {
@@ -543,6 +585,8 @@ contract PrendaTest is Test {
         assertEq(prenda.transferCountOf(TOKEN), 2);
         assertTrue(prenda.isTokenIdUsed(TOKEN));
 
+        // Near the end of the dates the contract can store, so that the new date is within reach of a waiver.
+        vm.warp(type(uint48).max - 700 days);
         vm.prank(admin);
         prenda.extendFreeStorage(TOKEN, type(uint48).max - 60 days);
         (freeUntil, feePerPeriod, maxFee) = prenda.storageTermsOf(TOKEN);
@@ -675,7 +719,7 @@ contract PrendaTest is Test {
         _sell(alice, TOKEN + 1);
         vm.warp(soldAt + FREE_PERIOD + 30 days);
         vm.prank(admin);
-        prenda.extendFreeStorage(TOKEN + 1, type(uint48).max);
+        prenda.extendFreeStorage(TOKEN + 1, uint48(block.timestamp + 365 days));
         _fundAndApprove(alice, 100 * 10 ** 6);
 
         vm.startPrank(alice);
@@ -704,6 +748,76 @@ contract PrendaTest is Test {
         emit Prenda.Claimed(TOKEN + 1, alice, bytes32(0), 0);
         prenda.claim(TOKEN + 1, 0, bytes32(0));
         vm.stopPrank();
+    }
+
+    /**
+     * @dev The order server looks the burns up by order reference, so the layout of the event is part of the
+     * permanent interface: the garment, the claimer and the reference are the indexed fields, in that order, and
+     * the fee paid is the data.
+     */
+    function test_ClaimedEventHasTheOrderReferenceAsItsThirdIndexedField() public {
+        _sell(alice, TOKEN);
+        vm.warp(soldAt + FREE_PERIOD + 30 days);
+        _fundAndApprove(alice, FEE);
+        bytes32 order = keccak256("order 9");
+
+        vm.recordLogs();
+        vm.prank(alice);
+        prenda.claim(TOKEN, FEE, order);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        bytes32 signature = keccak256("Claimed(uint256,address,bytes32,uint256)");
+        uint256 found;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter != address(prenda) || logs[i].topics[0] != signature) continue;
+            found += 1;
+            assertEq(logs[i].topics.length, 4, "three indexed fields");
+            assertEq(logs[i].topics[1], bytes32(TOKEN));
+            assertEq(logs[i].topics[2], bytes32(uint256(uint160(alice))));
+            assertEq(logs[i].topics[3], order);
+            assertEq(logs[i].data, abi.encode(uint256(FEE)));
+        }
+        assertEq(found, 1);
+    }
+
+    /// @dev Two identical NFT contracts, the same garment, the same moment: one claim names an order, the other
+    /// does not. Who can claim, what is paid and what is burned must be the same.
+    function testFuzz_TheOrderReferenceChangesNothingButTheEvent(bytes32 order, uint32 wait, uint256 extra) public {
+        (Prenda twin, OpenMinterMock twinMinter, ) = _deployWith(usdt);
+        _sell(alice, TOKEN);
+        twinMinter.mint(alice, TOKEN, _terms(), CONTENT_HASH);
+        vm.warp(soldAt + wait);
+        uint256 fee = prenda.storageFeeOf(TOKEN);
+        assertEq(twin.storageFeeOf(TOKEN), fee);
+        uint256 accepted = fee + bound(extra, 0, 10 ** 9);
+
+        // Somebody else cannot claim, whatever order it names.
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Prenda.NotTokenHolder.selector, TOKEN, stranger));
+        prenda.claim(TOKEN, type(uint256).max, order);
+
+        vm.startPrank(alice);
+        usdt.mint(2 * fee);
+        usdt.approve(address(prenda), fee);
+        usdt.approve(address(twin), fee);
+        if (fee != 0) {
+            // One unit less than the fee is refused with and without an order.
+            vm.expectRevert(abi.encodeWithSelector(Prenda.StorageFeeAboveAccepted.selector, TOKEN, fee, fee - 1));
+            prenda.claim(TOKEN, fee - 1, order);
+            vm.expectRevert(abi.encodeWithSelector(Prenda.StorageFeeAboveAccepted.selector, TOKEN, fee, fee - 1));
+            twin.claim(TOKEN, fee - 1, bytes32(0));
+        }
+        prenda.claim(TOKEN, accepted, order);
+        assertEq(usdt.balanceOf(treasury), fee);
+        twin.claim(TOKEN, accepted, bytes32(0));
+        vm.stopPrank();
+
+        assertEq(usdt.balanceOf(treasury), 2 * fee);
+        assertEq(usdt.balanceOf(alice), 0);
+        assertEq(prenda.balanceOf(alice), 0);
+        assertEq(twin.balanceOf(alice), 0);
+        assertTrue(prenda.isTokenIdUsed(TOKEN));
+        assertTrue(twin.isTokenIdUsed(TOKEN));
     }
 
     function test_PaidClaimGoesToTheTreasuryInForceAtThatMoment() public {
@@ -774,6 +888,10 @@ contract PrendaTest is Test {
 
         assertEq(prenda.contentHashOf(TOKEN), CONTENT_HASH);
         assertTrue(prenda.isTokenIdUsed(TOKEN));
+        (uint48 freeUntil, uint80 feePerPeriod, uint80 maxFee) = prenda.storageTermsOf(TOKEN);
+        assertEq(freeUntil, soldAt + FREE_PERIOD);
+        assertEq(feePerPeriod, FEE);
+        assertEq(maxFee, MAX_FEE);
     }
 
     function test_BuyerOnTheMarketCanClaimAndTheSellerCannot() public {
@@ -1594,30 +1712,30 @@ contract PrendaTest is Test {
     }
 
     // ------------------------------------------------------------------------------------------------------------
-    // Approvals taken back (markets use the count to drop the offers made under an approval)
+    // Approvals taken back (markets use the two counts to drop the offers of a holder)
     // ------------------------------------------------------------------------------------------------------------
 
     function test_TakingBackAnApprovalForAllIsCounted() public {
-        assertEq(prenda.approvalsRevoked(alice, address(market)), 0);
+        assertEq(prenda.approvalsForAllRevoked(alice, address(market)), 0);
         _approveMarket(alice);
-        assertEq(prenda.approvalsRevoked(alice, address(market)), 0);
+        assertEq(prenda.approvalsForAllRevoked(alice, address(market)), 0);
 
         vm.prank(alice);
         prenda.setApprovalForAll(address(market), false);
-        assertEq(prenda.approvalsRevoked(alice, address(market)), 1);
+        assertEq(prenda.approvalsForAllRevoked(alice, address(market)), 1);
 
         // Taking back what is no longer given is not counted.
         vm.prank(alice);
         prenda.setApprovalForAll(address(market), false);
-        assertEq(prenda.approvalsRevoked(alice, address(market)), 1);
+        assertEq(prenda.approvalsForAllRevoked(alice, address(market)), 1);
 
         // Giving it again, even twice, is not counted. Taking it back again is.
         _approveMarket(alice);
         _approveMarket(alice);
-        assertEq(prenda.approvalsRevoked(alice, address(market)), 1);
+        assertEq(prenda.approvalsForAllRevoked(alice, address(market)), 1);
         vm.prank(alice);
         prenda.setApprovalForAll(address(market), false);
-        assertEq(prenda.approvalsRevoked(alice, address(market)), 2);
+        assertEq(prenda.approvalsForAllRevoked(alice, address(market)), 2);
     }
 
     function test_ClearingOrReplacingTheApprovalOfAnNftIsCounted() public {
@@ -1625,30 +1743,54 @@ contract PrendaTest is Test {
         OpenMarketMock other = _authorizeAnotherMarket();
         vm.startPrank(alice);
         prenda.approve(address(market), TOKEN);
-        assertEq(prenda.approvalsRevoked(alice, address(market)), 0);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(market)), 0);
         // Approving the same account again takes nothing back.
         prenda.approve(address(market), TOKEN);
-        assertEq(prenda.approvalsRevoked(alice, address(market)), 0);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(market)), 0);
 
         // Replacing it: the first market lost the approval, the second did not.
         prenda.approve(address(other), TOKEN);
-        assertEq(prenda.approvalsRevoked(alice, address(market)), 1);
-        assertEq(prenda.approvalsRevoked(alice, address(other)), 0);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(market)), 1);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(other)), 0);
 
         // Clearing it.
         prenda.approve(address(0), TOKEN);
-        assertEq(prenda.approvalsRevoked(alice, address(other)), 1);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(other)), 1);
 
         // Clearing when there is none takes nothing back from anybody.
         prenda.approve(address(0), TOKEN);
         vm.stopPrank();
-        assertEq(prenda.approvalsRevoked(alice, address(market)), 1);
-        assertEq(prenda.approvalsRevoked(alice, address(other)), 1);
-        assertEq(prenda.approvalsRevoked(alice, address(0)), 0);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(market)), 1);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(other)), 1);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(0)), 0);
+    }
+
+    /// @dev The two counts are kept apart: an approval for all is counted for the holder, the approval of one NFT
+    /// for that NFT, and neither touches the other.
+    function test_TheTwoCountsOfApprovalsTakenBackAreKeptApart() public {
+        _sell(alice, TOKEN);
+        _sell(alice, TOKEN + 1);
+        vm.startPrank(alice);
+        prenda.setApprovalForAll(address(market), true);
+        prenda.approve(address(market), TOKEN);
+        prenda.approve(address(market), TOKEN + 1);
+
+        // The approval of one NFT goes: only the count of that NFT moves.
+        prenda.approve(address(0), TOKEN);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(market)), 1);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN + 1, address(market)), 0);
+        assertEq(prenda.approvalsForAllRevoked(alice, address(market)), 0);
+
+        // The approval for all goes: only the count of the holder moves.
+        prenda.setApprovalForAll(address(market), false);
+        vm.stopPrank();
+        assertEq(prenda.approvalsForAllRevoked(alice, address(market)), 1);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(market)), 1);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN + 1, address(market)), 0);
     }
 
     /// @dev Each holder has a count of its own for each operator.
-    function test_ApprovalsTakenBackAreCountedForEachHolderAndOperator() public {
+    function test_ApprovalsForAllTakenBackAreCountedForEachHolderAndOperator() public {
         OpenMarketMock other = _authorizeAnotherMarket();
         _approveMarket(alice);
         _approveMarket(bob);
@@ -1658,10 +1800,28 @@ contract PrendaTest is Test {
         vm.prank(alice);
         prenda.setApprovalForAll(address(market), false);
 
-        assertEq(prenda.approvalsRevoked(alice, address(market)), 1);
-        assertEq(prenda.approvalsRevoked(bob, address(market)), 0);
-        assertEq(prenda.approvalsRevoked(alice, address(other)), 0);
-        assertEq(prenda.approvalsRevoked(address(market), alice), 0);
+        assertEq(prenda.approvalsForAllRevoked(alice, address(market)), 1);
+        assertEq(prenda.approvalsForAllRevoked(bob, address(market)), 0);
+        assertEq(prenda.approvalsForAllRevoked(alice, address(other)), 0);
+        assertEq(prenda.approvalsForAllRevoked(address(market), alice), 0);
+    }
+
+    /// @dev The count of an NFT follows the NFT: a later holder adds to the same count.
+    function test_ApprovalOfAnNftTakenBackByALaterHolderAddsToTheSameCount() public {
+        _sell(alice, TOKEN);
+        _approveMarket(alice);
+        vm.startPrank(alice);
+        prenda.approve(address(market), TOKEN);
+        prenda.approve(address(0), TOKEN);
+        vm.stopPrank();
+        market.move(alice, bob, TOKEN);
+
+        vm.startPrank(bob);
+        prenda.approve(address(market), TOKEN);
+        prenda.approve(address(0), TOKEN);
+        vm.stopPrank();
+
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(market)), 2);
     }
 
     /// @dev An approval that goes away because the NFT itself left its holder is not an approval taken back.
@@ -1677,8 +1837,10 @@ contract PrendaTest is Test {
         vm.prank(alice);
         prenda.claim(TOKEN + 1, 0, ORDER);
 
-        assertEq(prenda.approvalsRevoked(alice, address(market)), 0);
-        assertEq(prenda.approvalsRevoked(bob, address(market)), 0);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(market)), 0);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN + 1, address(market)), 0);
+        assertEq(prenda.approvalsForAllRevoked(alice, address(market)), 0);
+        assertEq(prenda.approvalsForAllRevoked(bob, address(market)), 0);
     }
 
     /// @dev Taking an approval back from a market that was disabled is always possible, and it is counted.
@@ -1695,10 +1857,51 @@ contract PrendaTest is Test {
         prenda.approve(address(0), TOKEN);
         vm.stopPrank();
 
-        assertEq(prenda.approvalsRevoked(alice, address(market)), 2);
+        assertEq(prenda.approvalsForAllRevoked(alice, address(market)), 1);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(market)), 1);
     }
 
-    /// @dev Somebody who is not the holder cannot make the count of the holder move.
+    /// @dev The pause stops sales and transfers, not the counting.
+    function test_ApprovalsTakenBackAreCountedWhileSalesArePaused() public {
+        _sell(alice, TOKEN);
+        _approveMarket(alice);
+        vm.prank(alice);
+        prenda.approve(address(market), TOKEN);
+        vm.prank(admin);
+        prenda.pause();
+
+        vm.startPrank(alice);
+        prenda.setApprovalForAll(address(market), false);
+        prenda.approve(address(0), TOKEN);
+        vm.stopPrank();
+
+        assertEq(prenda.approvalsForAllRevoked(alice, address(market)), 1);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(market)), 1);
+    }
+
+    /// @dev Once transfers are open holders can approve wallets too, and what they take back is counted the same.
+    function test_ApprovalsTakenBackAreCountedAfterTransfersAreOpened() public {
+        _sell(alice, TOKEN);
+        vm.prank(admin);
+        prenda.openTransfers();
+
+        vm.startPrank(alice);
+        prenda.setApprovalForAll(bob, true);
+        prenda.approve(bob, TOKEN);
+        prenda.setApprovalForAll(bob, false);
+        assertEq(prenda.approvalsForAllRevoked(alice, bob), 1);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, bob), 0);
+
+        prenda.approve(stranger, TOKEN);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, bob), 1);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, stranger), 0);
+        prenda.approve(address(0), TOKEN);
+        vm.stopPrank();
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, stranger), 1);
+        assertEq(prenda.approvalsForAllRevoked(alice, bob), 1);
+    }
+
+    /// @dev Somebody who is not the holder cannot make a count move.
     function test_RevertWhen_SomeoneElseTriesToTakeAnApprovalBackForTheHolder() public {
         _sell(alice, TOKEN);
         vm.prank(alice);
@@ -1710,8 +1913,7 @@ contract PrendaTest is Test {
         vm.expectRevert(_invalidApprover(address(market)));
         market.grant(address(0), TOKEN);
 
-        assertEq(prenda.approvalsRevoked(alice, address(market)), 0);
-        assertEq(prenda.approvalsRevoked(stranger, address(market)), 0);
+        assertEq(prenda.tokenApprovalsRevoked(TOKEN, address(market)), 0);
         assertEq(prenda.getApproved(TOKEN), address(market));
     }
 
@@ -2000,6 +2202,16 @@ contract PrendaTest is Test {
         assertEq(prenda.pendingTreasury(), address(0));
     }
 
+    function test_ProposingTheCurrentTreasuryIsAllowedAndChangesNothing() public {
+        vm.prank(admin);
+        prenda.proposeTreasury(treasury);
+        vm.prank(treasury);
+        prenda.acceptTreasury();
+
+        assertEq(prenda.treasury(), treasury);
+        assertEq(prenda.pendingTreasury(), address(0));
+    }
+
     // ------------------------------------------------------------------------------------------------------------
     // The account that can only pause
     // ------------------------------------------------------------------------------------------------------------
@@ -2079,6 +2291,45 @@ contract PrendaTest is Test {
         vm.prank(admin);
         prenda.setPauser(address(0));
         assertEq(prenda.pauser(), address(0));
+    }
+
+    /// @dev Receiving the money, being proposed to receive it, selling or reselling gives no key to the pause.
+    function test_RevertWhen_TheTreasuryOrAModulePauses() public {
+        address proposed = makeAddr("proposed treasury");
+        vm.prank(admin);
+        prenda.proposeTreasury(proposed);
+        address[5] memory callers = [treasury, proposed, address(minter), address(market), alice];
+
+        for (uint256 i = 0; i < callers.length; i++) {
+            vm.prank(callers[i]);
+            vm.expectRevert(_unauthorized(callers[i]));
+            prenda.pause();
+        }
+        assertFalse(prenda.paused());
+    }
+
+    /// @dev A known limit, pinned: whoever holds the pause key can pause again after every resume. The way out is
+    /// for the administration to take the key away.
+    function test_ThePauserCanPauseAgainAfterEveryResumeUntilTheKeyIsTakenAway() public {
+        address pauser = makeAddr("pauser");
+        vm.prank(admin);
+        prenda.setPauser(pauser);
+
+        for (uint256 i = 0; i < 3; i++) {
+            vm.prank(pauser);
+            prenda.pause();
+            assertTrue(prenda.paused());
+            vm.prank(admin);
+            prenda.unpause();
+        }
+        assertEq(prenda.pauser(), pauser);
+
+        vm.prank(admin);
+        prenda.setPauser(address(0));
+        vm.prank(pauser);
+        vm.expectRevert(_unauthorized(pauser));
+        prenda.pause();
+        assertFalse(prenda.paused());
     }
 
     function test_PauseAndUnpause() public {
@@ -2233,13 +2484,104 @@ contract PrendaTest is Test {
         assertEq(prenda.storageFeeOf(TOKEN), FEE);
     }
 
-    function test_ExtendFreeStorageToTheEndOfTimeMakesStorageFreeForGood() public {
+    /// @dev A waiver reaches two years ahead at most, and it can be given again as many times as needed.
+    function test_AWaiverCanBeRenewedToKeepStorageFree() public {
         _sell(alice, TOKEN);
 
-        vm.prank(admin);
+        for (uint256 i = 0; i < 5; i++) {
+            uint48 next = uint48(block.timestamp + 730 days);
+            vm.prank(admin);
+            prenda.extendFreeStorage(TOKEN, next);
+            vm.warp(next);
+            assertEq(prenda.storageFeeOf(TOKEN), 0);
+        }
+
+        // Ten years after the sale the garment still owes nothing; the fee starts 30 days after the last waiver.
+        vm.warp(block.timestamp + 30 days);
+        assertEq(prenda.storageFeeOf(TOKEN), FEE);
+    }
+
+    /// @dev A guard against a mistyped date: no waiver can reach further than the limit from the present.
+    function test_RevertWhen_AWaiverGoesBeyondTheLimit() public {
+        _sell(alice, TOKEN);
+        assertEq(prenda.MAX_WAIVER(), 730 days);
+        uint256 latest = block.timestamp + 730 days;
+        // What a date typed in milliseconds instead of seconds looks like.
+        uint48 inMilliseconds = uint48((block.timestamp + 30 days) * 1000);
+
+        vm.startPrank(admin);
+        vm.expectRevert(abi.encodeWithSelector(Prenda.FreeStorageBeyondLimit.selector, uint48(latest + 1), latest));
+        prenda.extendFreeStorage(TOKEN, uint48(latest + 1));
+        vm.expectRevert(abi.encodeWithSelector(Prenda.FreeStorageBeyondLimit.selector, inMilliseconds, latest));
+        prenda.extendFreeStorage(TOKEN, inMilliseconds);
+        vm.expectRevert(abi.encodeWithSelector(Prenda.FreeStorageBeyondLimit.selector, type(uint48).max, latest));
         prenda.extendFreeStorage(TOKEN, type(uint48).max);
 
-        vm.warp(soldAt + 36500 days);
+        vm.expectRevert(abi.encodeWithSelector(Prenda.FreeStorageBeyondLimit.selector, uint48(latest + 1), latest));
+        prenda.extendFreeStorageForAll(uint48(latest + 1));
+        vm.expectRevert(abi.encodeWithSelector(Prenda.FreeStorageBeyondLimit.selector, inMilliseconds, latest));
+        prenda.extendFreeStorageForAll(inMilliseconds);
+        vm.expectRevert(abi.encodeWithSelector(Prenda.FreeStorageBeyondLimit.selector, type(uint48).max, latest));
+        prenda.extendFreeStorageForAll(type(uint48).max);
+
+        // Exactly the limit is accepted, for one garment and for all.
+        prenda.extendFreeStorage(TOKEN, uint48(latest));
+        prenda.extendFreeStorageForAll(uint48(latest));
+        vm.stopPrank();
+        assertEq(prenda.freeStorageForAllUntil(), latest);
+        (uint48 freeUntil, , ) = prenda.storageTermsOf(TOKEN);
+        assertEq(freeUntil, latest);
+    }
+
+    /// @dev The limit is counted from the moment of each waiver, not from the sale.
+    function test_TheLimitOfAWaiverMovesWithTheClock() public {
+        _sell(alice, TOKEN);
+        uint48 tooFarToday = uint48(block.timestamp + 730 days + 1);
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(Prenda.FreeStorageBeyondLimit.selector, tooFarToday, block.timestamp + 730 days)
+        );
+        prenda.extendFreeStorage(TOKEN, tooFarToday);
+
+        vm.warp(block.timestamp + 1);
+        vm.prank(admin);
+        prenda.extendFreeStorage(TOKEN, tooFarToday);
+        (uint48 freeUntil, , ) = prenda.storageTermsOf(TOKEN);
+        assertEq(freeUntil, tooFarToday);
+    }
+
+    /// @dev A date already in the past is a valid waiver: it forgives part of what is due. For one and for all.
+    function test_AWaiverWithADateInThePastForgivesPartOfTheFee() public {
+        _sell(alice, TOKEN);
+        _sell(bob, TOKEN + 1);
+        vm.warp(soldAt + FREE_PERIOD + 95 days);
+        assertEq(prenda.storageFeeOf(TOKEN), 3 * uint256(FEE));
+
+        vm.startPrank(admin);
+        prenda.extendFreeStorage(TOKEN, uint48(soldAt + FREE_PERIOD + 40 days));
+        assertEq(prenda.storageFeeOf(TOKEN), FEE);
+        prenda.extendFreeStorageForAll(uint48(soldAt + FREE_PERIOD + 10 days));
+        vm.stopPrank();
+
+        assertEq(prenda.storageFeeOf(TOKEN), FEE);
+        assertEq(prenda.storageFeeOf(TOKEN + 1), 2 * uint256(FEE));
+    }
+
+    /// @dev A waiver for one garment touches neither the other garments nor the date given to all.
+    function test_AWaiverForOneGarmentDoesNotTouchTheOthers() public {
+        _sell(alice, TOKEN);
+        _sell(bob, TOKEN + 1);
+        uint48 forAll = uint48(soldAt + FREE_PERIOD + 10 days);
+        vm.startPrank(admin);
+        prenda.extendFreeStorageForAll(forAll);
+        prenda.extendFreeStorage(TOKEN, uint48(soldAt + 700 days));
+        vm.stopPrank();
+
+        assertEq(prenda.freeStorageForAllUntil(), forAll);
+        (uint48 freeUntil, , ) = prenda.storageTermsOf(TOKEN + 1);
+        assertEq(freeUntil, forAll);
+        vm.warp(uint256(forAll) + 30 days);
+        assertEq(prenda.storageFeeOf(TOKEN + 1), FEE);
         assertEq(prenda.storageFeeOf(TOKEN), 0);
     }
 
@@ -2258,9 +2600,10 @@ contract PrendaTest is Test {
     }
 
     function test_RevertWhen_ExtendingFreeStorageOfAnNftThatDoesNotExist() public {
+        uint48 newFreeUntil = uint48(soldAt + FREE_PERIOD + 1 days);
         vm.prank(admin);
         vm.expectRevert(_nonexistent(TOKEN));
-        prenda.extendFreeStorage(TOKEN, type(uint48).max);
+        prenda.extendFreeStorage(TOKEN, newFreeUntil);
 
         _sell(alice, TOKEN);
         vm.prank(alice);
@@ -2268,7 +2611,7 @@ contract PrendaTest is Test {
 
         vm.prank(admin);
         vm.expectRevert(_nonexistent(TOKEN));
-        prenda.extendFreeStorage(TOKEN, type(uint48).max);
+        prenda.extendFreeStorage(TOKEN, newFreeUntil);
     }
 
     /// @dev Two identical garments sold at the same time; only the second one gets an extension.
@@ -2276,7 +2619,7 @@ contract PrendaTest is Test {
         _sell(alice, TOKEN);
         _sell(alice, TOKEN + 1);
         uint256 current = soldAt + FREE_PERIOD;
-        uint48 newFreeUntil = uint48(bound(extension, current + 1, type(uint48).max));
+        uint48 newFreeUntil = uint48(bound(extension, current + 1, soldAt + 730 days));
 
         vm.prank(admin);
         prenda.extendFreeStorage(TOKEN + 1, newFreeUntil);
@@ -2319,7 +2662,7 @@ contract PrendaTest is Test {
     }
 
     function test_FreeStorageForAllAlsoCoversGarmentsSoldLater() public {
-        uint48 forAll = uint48(soldAt + 1000 days);
+        uint48 forAll = uint48(soldAt + 700 days);
         vm.prank(admin);
         prenda.extendFreeStorageForAll(forAll);
 
@@ -2350,7 +2693,7 @@ contract PrendaTest is Test {
 
     function test_UnusedTokenIdHasNoStorageTermsEvenWithFreeStorageForAll() public {
         vm.prank(admin);
-        prenda.extendFreeStorageForAll(type(uint48).max);
+        prenda.extendFreeStorageForAll(uint48(block.timestamp + 365 days));
 
         (uint48 freeUntil, uint80 feePerPeriod, uint80 maxFee) = prenda.storageTermsOf(TOKEN);
         assertEq(freeUntil, 0);
@@ -2430,7 +2773,7 @@ contract PrendaTest is Test {
         });
         minter.mint(alice, TOKEN, terms, CONTENT_HASH);
         twinMinter.mint(alice, TOKEN, terms, CONTENT_HASH);
-        forAll = uint48(bound(forAll, 1, type(uint48).max));
+        forAll = uint48(bound(forAll, 1, soldAt + 730 days));
 
         vm.prank(admin);
         twin.extendFreeStorageForAll(forAll);

@@ -11,8 +11,8 @@ import {TestUSDT0} from "./mocks/TestUSDT0.sol";
  * direct transfer attempts, approvals given and taken back, claims, attempts by the wrong party, storage waivers,
  * pauses, treasury changes, opening transfers and disabling the market. The handler keeps its own books and writes
  * down anything that must never happen; after every step the invariants compare the contract with those books.
- * The books never read the contract to decide what should happen: approvals, the pause and the two one-way
- * switches are kept on the side.
+ * The books never read the contract to decide what should happen: approvals, approvals taken back, storage dates
+ * and fees, the treasury in force, the pause and the two one-way switches are kept on the side.
  *
  * The handler plays the sale module: it is the minter, and it names the NFT contract through `prenda()`.
  */
@@ -20,12 +20,17 @@ contract PrendaHandler is Test {
     struct Book {
         bool burned;
         address holder;
+        /// The end of free storage fixed at the sale, and the garment's own end after the waivers it got.
         uint48 originalFreeUntil;
+        uint48 freeUntil;
         uint80 feePerPeriod;
         uint80 maxFee;
         uint32 moves;
         address approved;
     }
+
+    /// @dev How far ahead of the present a waiver can reach.
+    uint256 public constant MAX_WAIVER = 730 days;
 
     Prenda public immutable prenda;
     TestUSDT0 public immutable usdt;
@@ -41,16 +46,27 @@ contract PrendaHandler is Test {
     uint256 public feesPaid;
     mapping(uint256 tokenId => Book) internal _books;
 
-    /// @dev Approvals as the holders gave them, how many each holder took back from each operator, the pause and
-    /// the two switches that only go one way.
+    /// @dev Approvals as the holders gave them, how many approvals for all each holder took back from each
+    /// operator, how many times the approval of each NFT was taken back from each operator, the pause and the two
+    /// switches that only go one way.
     mapping(address holder => mapping(address operator => bool)) public approvedForAllBook;
-    mapping(address holder => mapping(address operator => uint64)) public revokedBook;
+    mapping(address holder => mapping(address operator => uint64)) public revokedForAllBook;
+    mapping(uint256 tokenId => mapping(address operator => uint64)) public revokedForNftBook;
     bool public pausedBook;
     bool public openBook;
     bool public marketDisabledBook;
 
+    /// @dev The end of free storage given to every garment, the treasury in force and the one proposed.
+    uint48 public forAllBook;
+    address public treasuryBook;
+    address public pendingTreasuryBook;
+
     /// @dev Things that must never happen. The invariant test requires this list to stay empty.
     string[] public violations;
+
+    /// @dev The last NFT whose approval was given. Approvals aim at it half of the time, so that approvals of one
+    /// NFT are replaced and cleared often enough.
+    uint256 internal _lastApproved;
 
     // Counters, so that the fixed walk can check that the interesting paths were really taken.
     uint256 public marketMoves;
@@ -60,8 +76,11 @@ contract PrendaHandler is Test {
     uint256 public blockedByPause;
     uint256 public waivers;
     uint256 public waiversForAll;
+    uint256 public waiversBeyondTheLimit;
     uint256 public refusedGrants;
-    uint256 public approvalsTakenBack;
+    uint256 public approvalsForAllTakenBack;
+    uint256 public nftApprovalsTakenBack;
+    uint256 public treasuryProposalsLeftPending;
 
     constructor(
         Prenda prenda_,
@@ -77,6 +96,7 @@ contract PrendaHandler is Test {
         admin = admin_;
         pauser = pauser_;
         treasuries = [prenda_.treasury(), secondTreasury];
+        treasuryBook = treasuries[0];
         for (uint256 i = 0; i < 4; i++) {
             actors.push(makeAddr(string.concat("actor ", vm.toString(i))));
         }
@@ -101,6 +121,12 @@ contract PrendaHandler is Test {
     function _pick(uint256 seed) internal view returns (uint256 tokenId, bool ok) {
         if (minted == 0) return (0, false);
         return (1 + (seed % minted), true);
+    }
+
+    /// @dev Half of the time the last NFT whose approval was given, when there is one; otherwise any NFT.
+    function _pickApproved(uint256 seed) internal view returns (uint256 tokenId, bool ok) {
+        if (_lastApproved != 0 && seed % 2 == 0) return (_lastApproved, true);
+        return _pick(seed >> 1);
     }
 
     /// @dev The rule of the contract, from the books: who may be the one that executes a transfer.
@@ -145,6 +171,7 @@ contract PrendaHandler is Test {
                 burned: false,
                 holder: to,
                 originalFreeUntil: uint48(block.timestamp + freePeriod),
+                freeUntil: uint48(block.timestamp + freePeriod),
                 feePerPeriod: feePerPeriod,
                 maxFee: maxFee,
                 moves: 0,
@@ -183,7 +210,7 @@ contract PrendaHandler is Test {
         address operator = _operator(operatorSeed);
         _setApprovalForAll(_actor(actorSeed), operator, true);
 
-        (uint256 tokenId, bool ok) = _pick(tokenSeed);
+        (uint256 tokenId, bool ok) = _pickApproved(tokenSeed);
         if (!ok || _books[tokenId].burned) return;
         _approve(tokenId, operator);
     }
@@ -193,7 +220,7 @@ contract PrendaHandler is Test {
     function takeApprovalsBack(uint256 actorSeed, uint256 operatorSeed, uint256 tokenSeed) external {
         _setApprovalForAll(_actor(actorSeed), _operator(operatorSeed), false);
 
-        (uint256 tokenId, bool ok) = _pick(tokenSeed);
+        (uint256 tokenId, bool ok) = _pickApproved(tokenSeed);
         if (!ok || _books[tokenId].burned) return;
         _approve(tokenId, address(0));
     }
@@ -204,8 +231,8 @@ contract PrendaHandler is Test {
         try prenda.setApprovalForAll(operator, approved) {
             if (!expected) violations.push("an account that may not move NFTs got an approval for all");
             if (!approved && approvedForAllBook[holder][operator]) {
-                revokedBook[holder][operator] += 1;
-                approvalsTakenBack += 1;
+                revokedForAllBook[holder][operator] += 1;
+                approvalsForAllTakenBack += 1;
             }
             approvedForAllBook[holder][operator] = approved;
         } catch {
@@ -222,10 +249,11 @@ contract PrendaHandler is Test {
         try prenda.approve(operator, tokenId) {
             if (!expected) violations.push("an account that may not move NFTs got the approval of an NFT");
             if (b.approved != address(0) && b.approved != operator) {
-                revokedBook[b.holder][b.approved] += 1;
-                approvalsTakenBack += 1;
+                revokedForNftBook[tokenId][b.approved] += 1;
+                nftApprovalsTakenBack += 1;
             }
             _books[tokenId].approved = operator;
+            if (operator != address(0)) _lastApproved = tokenId;
         } catch {
             if (operator == address(0)) violations.push("clearing the approval of an NFT failed");
             else if (expected) violations.push("the approval of an NFT that should work failed");
@@ -276,7 +304,7 @@ contract PrendaHandler is Test {
         uint256 choice = (executorSeed >> 1) % (actors.length + 3);
         address executor = executorSeed % 2 == 0 ? holder : choice < actors.length
             ? actors[choice]
-            : choice == actors.length ? admin : choice == actors.length + 1 ? prenda.treasury() : address(this);
+            : choice == actors.length ? admin : choice == actors.length + 1 ? treasuryBook : address(this);
         bool open = openBook;
         bool paused = pausedBook;
         bool entitled = executor == holder || _approvedBy(holder, executor, tokenId);
@@ -316,11 +344,14 @@ contract PrendaHandler is Test {
         (uint256 tokenId, bool ok) = _pick(tokenSeed);
         if (!ok || _books[tokenId].burned) return;
         Book memory b = _books[tokenId];
-        uint256 fee = prenda.storageFeeOf(tokenId);
+        // The fee by the books. The claimer brings exactly that much, so a claim that charged anything else fails
+        // or leaves a balance that does not match.
+        uint256 fee = _fee(b);
+        if (prenda.storageFeeOf(tokenId) != fee) violations.push("the storage fee is not what the books give");
         if (fee > _originalFee(b)) violations.push("the storage fee is above what the original terms give");
         if (fee > b.maxFee) violations.push("the storage fee is above its ceiling");
 
-        address currentTreasury = prenda.treasury();
+        address currentTreasury = treasuryBook;
         uint256 treasuryBefore = usdt.balanceOf(currentTreasury);
         uint256 accepted = fee + bound(extraAccepted, 0, 10 ** 12);
 
@@ -362,23 +393,34 @@ contract PrendaHandler is Test {
 
     // --------------------------------------------------------------------------------------------- administration
 
+    /// @dev More free storage for one garment. The new date is later than the one in force; it is accepted only
+    /// if it is no further than the limit from now.
     function waiveStorage(uint256 tokenSeed, uint48 extra) external {
         (uint256 tokenId, bool ok) = _pick(tokenSeed);
         if (!ok || _books[tokenId].burned) return;
-        (uint48 current, , ) = prenda.storageTermsOf(tokenId);
+        uint48 current = _freeUntil(_books[tokenId]);
         uint48 next = uint48(bound(extra, uint256(current) + 1, uint256(current) + 400 days));
-        uint256 feeBefore = prenda.storageFeeOf(tokenId);
+        bool expected = next <= block.timestamp + MAX_WAIVER;
+        uint256 feeBefore = _fee(_books[tokenId]);
+
         vm.prank(admin);
-        prenda.extendFreeStorage(tokenId, next);
-        if (prenda.storageFeeOf(tokenId) > feeBefore) violations.push("a waiver raised the fee");
-        waivers += 1;
+        try prenda.extendFreeStorage(tokenId, next) {
+            if (!expected) violations.push("a waiver went beyond the limit");
+            _books[tokenId].freeUntil = next;
+            uint256 feeAfter = prenda.storageFeeOf(tokenId);
+            if (feeAfter != _fee(_books[tokenId])) violations.push("after a waiver the fee is not what the books give");
+            if (feeAfter > feeBefore) violations.push("a waiver raised the fee");
+            waivers += 1;
+        } catch {
+            if (expected) violations.push("a valid waiver failed");
+            waiversBeyondTheLimit += 1;
+        }
     }
 
     function tryToShortenFreeStorage(uint256 tokenSeed, uint48 earlier) external {
         (uint256 tokenId, bool ok) = _pick(tokenSeed);
         if (!ok || _books[tokenId].burned) return;
-        (uint48 current, , ) = prenda.storageTermsOf(tokenId);
-        earlier = uint48(bound(earlier, 0, current));
+        earlier = uint48(bound(earlier, 0, _freeUntil(_books[tokenId])));
         vm.prank(admin);
         try prenda.extendFreeStorage(tokenId, earlier) {
             violations.push("free storage was shortened or left equal");
@@ -387,25 +429,58 @@ contract PrendaHandler is Test {
 
     /// @dev Free storage for every garment at once. Kept short, so that fees start to add up again afterwards.
     function waiveStorageForAll(uint48 extra) external {
-        uint48 current = prenda.freeStorageForAllUntil();
+        uint48 current = forAllBook;
         uint256 base = current > block.timestamp ? current : block.timestamp;
         uint48 next = uint48(bound(extra, uint256(current) + 1, base + 20 days));
+        bool expected = next <= block.timestamp + MAX_WAIVER;
         (uint256 tokenId, bool ok) = _pick(extra);
         bool sampled = ok && !_books[tokenId].burned;
-        uint256 feeBefore = sampled ? prenda.storageFeeOf(tokenId) : 0;
+        uint256 feeBefore = sampled ? _fee(_books[tokenId]) : 0;
 
         vm.prank(admin);
-        prenda.extendFreeStorageForAll(next);
-        if (sampled && prenda.storageFeeOf(tokenId) > feeBefore) violations.push("a waiver for all raised a fee");
-        waiversForAll += 1;
+        try prenda.extendFreeStorageForAll(next) {
+            if (!expected) violations.push("a waiver for all went beyond the limit");
+            forAllBook = next;
+            if (sampled) {
+                uint256 feeAfter = prenda.storageFeeOf(tokenId);
+                if (feeAfter != _fee(_books[tokenId])) {
+                    violations.push("after a waiver for all a fee is not what the books give");
+                }
+                if (feeAfter > feeBefore) violations.push("a waiver for all raised a fee");
+            }
+            waiversForAll += 1;
+        } catch {
+            if (expected) violations.push("a valid waiver for all failed");
+            waiversBeyondTheLimit += 1;
+        }
     }
 
     function tryToShortenFreeStorageForAll(uint48 earlier) external {
-        earlier = uint48(bound(earlier, 0, prenda.freeStorageForAllUntil()));
+        earlier = uint48(bound(earlier, 0, forAllBook));
         vm.prank(admin);
         try prenda.extendFreeStorageForAll(earlier) {
             violations.push("free storage for all was shortened or left equal");
         } catch {}
+    }
+
+    /// @dev A date further than the limit from now must be refused, for every garment and for one.
+    function tryToWaiveBeyondTheLimit(uint256 tokenSeed, uint48 far) external {
+        far = uint48(bound(far, block.timestamp + MAX_WAIVER + 1, type(uint48).max));
+        vm.startPrank(admin);
+        try prenda.extendFreeStorageForAll(far) {
+            violations.push("a waiver for all went beyond the limit");
+        } catch {
+            waiversBeyondTheLimit += 1;
+        }
+        (uint256 tokenId, bool ok) = _pick(tokenSeed);
+        if (ok && !_books[tokenId].burned) {
+            try prenda.extendFreeStorage(tokenId, far) {
+                violations.push("a waiver went beyond the limit");
+            } catch {
+                waiversBeyondTheLimit += 1;
+            }
+        }
+        vm.stopPrank();
     }
 
     /// @dev Half of the time it is the account that can only pause that pauses; only the administration resumes.
@@ -425,12 +500,27 @@ contract PrendaHandler is Test {
         pausedBook = paused;
     }
 
-    function changeTreasury(uint256 seed) external {
+    /// @dev The administration proposes one of the two treasuries. Nothing changes unless that one accepts, and
+    /// nobody else can accept in its place.
+    function changeTreasury(uint256 seed, bool accepts) external {
         address next = treasuries[seed % 2];
+        address other = treasuries[1 - (seed % 2)];
         vm.prank(admin);
         prenda.proposeTreasury(next);
+        pendingTreasuryBook = next;
+
+        vm.prank(other);
+        try prenda.acceptTreasury() {
+            violations.push("an account that was not proposed became the treasury");
+        } catch {}
+        if (!accepts) {
+            treasuryProposalsLeftPending += 1;
+            return;
+        }
         vm.prank(next);
         prenda.acceptTreasury();
+        treasuryBook = next;
+        pendingTreasuryBook = address(0);
     }
 
     /// @dev Rare on purpose: most sequences should spend their time with transfers closed.
@@ -458,10 +548,34 @@ contract PrendaHandler is Test {
         return _originalFee(_books[tokenId]);
     }
 
+    function feeOf(uint256 tokenId) external view returns (uint256) {
+        return _fee(_books[tokenId]);
+    }
+
+    function freeUntilOf(uint256 tokenId) external view returns (uint48) {
+        return _freeUntil(_books[tokenId]);
+    }
+
+    /// @dev The end of free storage in force: the garment's own or the one given to all, whichever is later.
+    function _freeUntil(Book memory b) internal view returns (uint48) {
+        return b.freeUntil > forAllBook ? b.freeUntil : forAllBook;
+    }
+
+    /// @dev The fee by the books, waivers included.
+    function _fee(Book memory b) internal view returns (uint256) {
+        return _feeFrom(_freeUntil(b), b);
+    }
+
     /// @dev Fee according to the terms fixed at the sale, ignoring any waiver. Nothing may ever charge more.
     function _originalFee(Book memory b) internal view returns (uint256) {
-        if (block.timestamp < uint256(b.originalFreeUntil) + 30 days) return 0;
-        uint256 instalments = (block.timestamp - b.originalFreeUntil) / 30 days;
+        return _feeFrom(b.originalFreeUntil, b);
+    }
+
+    /// @dev The storage rule: nothing until 30 full days after the end of free storage, then one instalment for
+    /// every full 30 days, up to the ceiling.
+    function _feeFrom(uint256 freeUntil, Book memory b) internal view returns (uint256) {
+        if (block.timestamp < freeUntil + 30 days) return 0;
+        uint256 instalments = (block.timestamp - freeUntil) / 30 days;
         uint256 fee = instalments * b.feePerPeriod;
         return fee > b.maxFee ? b.maxFee : fee;
     }
@@ -490,7 +604,7 @@ contract PrendaInvariantTest is Test {
         prenda.setPauser(pauser);
         vm.stopPrank();
 
-        bytes4[] memory selectors = new bytes4[](20);
+        bytes4[] memory selectors = new bytes4[](21);
         selectors[0] = PrendaHandler.sell.selector;
         selectors[1] = PrendaHandler.sellAUsedNumberAgain.selector;
         selectors[2] = PrendaHandler.approveMarketForAll.selector;
@@ -511,6 +625,7 @@ contract PrendaInvariantTest is Test {
         selectors[17] = PrendaHandler.waiveStorageForAll.selector;
         selectors[18] = PrendaHandler.tryToShortenFreeStorageForAll.selector;
         selectors[19] = PrendaHandler.takeApprovalsBack.selector;
+        selectors[20] = PrendaHandler.tryToWaiveBeyondTheLimit.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -549,6 +664,7 @@ contract PrendaInvariantTest is Test {
             (uint48 freeUntil, uint80 feePerPeriod, uint80 maxFee) = prenda.storageTermsOf(tokenId);
             assertEq(feePerPeriod, b.feePerPeriod);
             assertEq(maxFee, b.maxFee);
+            assertEq(freeUntil, handler.freeUntilOf(tokenId));
             assertGe(freeUntil, b.originalFreeUntil);
 
             if (b.burned) {
@@ -560,6 +676,7 @@ contract PrendaInvariantTest is Test {
                 // The approval of an NFT is reported only while the approved account may move NFTs.
                 assertEq(prenda.getApproved(tokenId), handler.mayMoveTokens(b.approved) ? b.approved : address(0));
                 uint256 fee = prenda.storageFeeOf(tokenId);
+                assertEq(fee, handler.feeOf(tokenId));
                 assertLe(fee, maxFee);
                 assertLe(fee, handler.originalFee(tokenId));
             }
@@ -567,9 +684,13 @@ contract PrendaInvariantTest is Test {
         assertFalse(prenda.isTokenIdUsed(minted + 1));
     }
 
-    /// @dev The pause, the one-way switches, every approval for all and every count of approvals taken back.
+    /// @dev The pause, the one-way switches, the date of free storage for all, the treasury in force and the one
+    /// proposed, every approval for all and every count of approvals taken back.
     function invariant_SwitchesAndApprovalsMatchTheBooks() public view {
         assertEq(prenda.paused(), handler.pausedBook());
+        assertEq(prenda.freeStorageForAllUntil(), handler.forAllBook());
+        assertEq(prenda.treasury(), handler.treasuryBook());
+        assertEq(prenda.pendingTreasury(), handler.pendingTreasuryBook());
         assertEq(prenda.transfersOpen(), handler.openBook());
         assertEq(
             uint8(prenda.marketStatus(address(market))),
@@ -581,11 +702,26 @@ contract PrendaInvariantTest is Test {
             address holder = handler.actors(i);
             for (uint256 j = 0; j <= count; j++) {
                 address operator = j == count ? address(market) : handler.actors(j);
-                assertEq(prenda.approvalsRevoked(holder, operator), handler.revokedBook(holder, operator));
+                assertEq(
+                    prenda.approvalsForAllRevoked(holder, operator),
+                    handler.revokedForAllBook(holder, operator)
+                );
                 // An approval for all counts only while its operator may move NFTs.
                 assertEq(
                     prenda.isApprovedForAll(holder, operator),
                     handler.approvedForAllBook(holder, operator) && handler.mayMoveTokens(operator)
+                );
+            }
+        }
+
+        // How often the approval of each NFT was taken back from each account that ever had one.
+        uint256 minted = handler.minted();
+        for (uint256 tokenId = 1; tokenId <= minted; tokenId++) {
+            for (uint256 j = 0; j <= count; j++) {
+                address operator = j == count ? address(market) : handler.actors(j);
+                assertEq(
+                    prenda.tokenApprovalsRevoked(tokenId, operator),
+                    handler.revokedForNftBook(tokenId, operator)
                 );
             }
         }
@@ -634,7 +770,7 @@ contract PrendaInvariantTest is Test {
             else if (kind < 86) handler.waiveStorage(a, uint48(b));
             else if (kind < 89) handler.tryToShortenFreeStorage(a, uint48(b));
             else if (kind < 92) handler.setPaused(a % 3 == 0, b % 2 == 0);
-            else if (kind < 94) handler.changeTreasury(a);
+            else if (kind < 94) handler.changeTreasury(a, b % 3 != 0);
             else handler.letTimePass(uint32(a));
 
             // Attempts that must always fail and so never change the walk.
@@ -642,6 +778,7 @@ contract PrendaInvariantTest is Test {
             if (i % 11 == 5) handler.sendToTheNftContract(c);
             if (i % 150 == 75) handler.waiveStorageForAll(uint48(a));
             if (i % 97 == 50) handler.tryToShortenFreeStorageForAll(uint48(b));
+            if (i % 53 == 20) handler.tryToWaiveBeyondTheLimit(a, uint48(c));
 
             if (i == (steps * 2) / 3) handler.openTransfers(0);
             if (i == steps - 100) handler.disableTheMarket(0);
@@ -657,9 +794,12 @@ contract PrendaInvariantTest is Test {
         assertGt(handler.freeClaims(), 7);
         assertGt(handler.waivers(), 9);
         assertGt(handler.waiversForAll(), 2);
+        assertGt(handler.waiversBeyondTheLimit(), 10);
         assertGt(handler.blockedByPause(), 20);
         assertGt(handler.refusedGrants(), 25);
-        assertGt(handler.approvalsTakenBack(), 8);
+        assertGt(handler.approvalsForAllTakenBack(), 8);
+        assertGt(handler.nftApprovalsTakenBack(), 1);
+        assertGt(handler.treasuryProposalsLeftPending(), 1);
         assertTrue(prenda.transfersOpen());
         assertEq(uint8(prenda.marketStatus(address(market))), uint8(Prenda.MarketStatus.Disabled));
     }

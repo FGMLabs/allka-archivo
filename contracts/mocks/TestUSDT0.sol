@@ -8,23 +8,28 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 /// @dev It copies USDT0's 6 decimals and nothing else. It has no value, no
 ///      blocklist and no upgradeability, so passing tests against this token
 ///      does not replace testing against the real USDT0 before mainnet.
-///      Anyone can mint to themselves. It refuses to be deployed on Conflux
-///      eSpace mainnet, so that the test deployment cannot land there by mistake.
+///      Anyone can mint to themselves. It can only be deployed on the testnet
+///      of Conflux eSpace and on a local simulated network, so that the test
+///      deployment, which starts with this token, cannot land anywhere else.
 contract TestUSDT0 is ERC20 {
     /// @notice Largest amount a single call to `mint` can create: 10,000 tokens.
     uint256 public constant MAX_MINT_PER_CALL = 10_000 * 10 ** 6;
 
-    /// @notice Chain id of Conflux eSpace mainnet, where this token must never exist.
-    uint256 public constant MAINNET_CHAIN_ID = 1030;
+    /// @dev The two networks this token can exist on: the testnet of Conflux eSpace and the local simulated
+    /// network of the development tools.
+    uint256 private constant CONFLUX_ESPACE_TESTNET = 71;
+    uint256 private constant LOCAL_SIMULATED_NETWORK = 31337;
 
     /// @notice The requested amount is above `MAX_MINT_PER_CALL`.
     error MintTooLarge(uint256 requested, uint256 maximum);
 
-    /// @notice Somebody tried to deploy the test token on mainnet.
-    error NotForMainnet();
+    /// @notice Somebody tried to deploy the test token on a network that is not a test network.
+    error OnlyForTestNetworks(uint256 chainId);
 
     constructor() ERC20("Test USDT0", "tUSDT0") {
-        if (block.chainid == MAINNET_CHAIN_ID) revert NotForMainnet();
+        if (block.chainid != CONFLUX_ESPACE_TESTNET && block.chainid != LOCAL_SIMULATED_NETWORK) {
+            revert OnlyForTestNetworks(block.chainid);
+        }
     }
 
     /// @notice USDT0 uses 6 decimals: 1 token is written as 1_000_000.

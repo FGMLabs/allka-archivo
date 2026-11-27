@@ -17,8 +17,9 @@ import {TestUSDT0} from "./mocks/TestUSDT0.sol";
  *
  * Before every operation the handler works out, from its own books, whether the operation should succeed. A result
  * that does not match is written down as a violation. The books also follow every unit of money: what each wallet
- * must hold and what the treasury must have received. The books never read the contracts to decide: approvals, the
- * pause and every date are kept on the side and compared with the contracts afterwards.
+ * must hold and what each treasury must have received. The books never read the contracts to decide: approvals,
+ * approvals taken back, the pause, the treasury in force and every date are kept on the side and compared with the
+ * contracts afterwards.
  */
 contract ArchivoHandler is Test {
     uint48 public constant DELAY = 1 hours;
@@ -48,7 +49,8 @@ contract ArchivoHandler is Test {
         address holder;
         uint32 moves;
         uint48 freeUntil;
-        bool approvedForMarket;
+        /// The account approved for this one NFT: the market, the other market or nobody.
+        address approved;
     }
 
     struct ListingBook {
@@ -57,7 +59,18 @@ contract ArchivoHandler is Test {
         uint80 price;
         uint48 expiresAt;
         uint32 moves;
-        uint64 revoked;
+        uint64 revokedForAll;
+        uint64 revokedForNft;
+    }
+
+    /// @dev Why an offer cannot be taken, by the books. The first reason that applies, in this order.
+    enum Refusal {
+        None,
+        Offer,
+        Hands,
+        NotApproved,
+        ForAllTakenBack,
+        NftTakenBack
     }
 
     Prenda public immutable prenda;
@@ -82,10 +95,14 @@ contract ArchivoHandler is Test {
     mapping(uint256 tokenId => ListingBook) internal _listings;
     mapping(uint32 dropId => mapping(address account => bool)) internal _boughtEarly;
 
-    /// @dev Whether each wallet approves the market for all its NFTs, and how many approvals it took back from it.
+    /// @dev Whether each wallet approves the market for all its NFTs, how many times it took that approval back,
+    /// and how many times the approval of each NFT was taken back from the market.
     mapping(address account => bool) public approvesMarket;
-    mapping(address account => uint64) public revokedBook;
+    mapping(address account => uint64) public revokedForAllBook;
+    mapping(uint256 tokenId => uint64) public revokedForNftBook;
     bool public pausedBook;
+    /// @dev The treasury in force.
+    address public treasuryBook;
 
     /// @dev The last drop, the last drop that was closed, garments ever sold and garments ever offered on the
     /// market. Most operations aim at these so that the interesting paths are taken often; the rest of the time
@@ -98,8 +115,10 @@ contract ArchivoHandler is Test {
 
     /// @dev What each wallet must hold: money from its sales plus money minted for purchases that did not happen.
     mapping(address account => uint256) public expectedBalance;
-    /// @dev Everything the treasuries must have received: first sales, market fees and storage fees.
+    /// @dev Everything the treasuries must have received: first sales, market fees and storage fees. In total,
+    /// and for each treasury what came in while it was the one in force.
     uint256 public treasuryIncome;
+    mapping(address treasury => uint256) public treasuryIncomeOf;
 
     string[] public violations;
 
@@ -110,8 +129,12 @@ contract ArchivoHandler is Test {
     uint256 public offersMade;
     uint256 public resales;
     uint256 public refusedResales;
+    uint256 public resalesUnderOneNftApproval;
     uint256 public staleOffersRefused;
-    uint256 public revokedOffersRefused;
+    uint256 public offersRefusedForAllTakenBack;
+    uint256 public offersRefusedForNftTakenBack;
+    uint256 public nftApprovalsCleared;
+    uint256 public nftApprovalsReplaced;
     uint256 public paidClaims;
     uint256 public freeClaims;
     uint256 public dropsClosedBeforeOpening;
@@ -138,6 +161,7 @@ contract ArchivoHandler is Test {
         admin = admin_;
         operator = operator_;
         treasuries = [prenda_.treasury(), secondTreasury];
+        treasuryBook = treasuries[0];
         for (uint256 i = 0; i < 5; i++) {
             actors.push(makeAddr(string.concat("actor ", vm.toString(i))));
         }
@@ -225,7 +249,13 @@ contract ArchivoHandler is Test {
 
     /// @dev From the books: the holder approved the market for all its NFTs or for this one.
     function _marketApprovedBy(address holder, uint256 tokenId) internal view returns (bool) {
-        return approvesMarket[holder] || _items[tokenId].approvedForMarket;
+        return approvesMarket[holder] || _items[tokenId].approved == address(mercado);
+    }
+
+    /// @dev Money that must have reached the treasury in force.
+    function _toTreasury(uint256 amount) internal {
+        treasuryIncome += amount;
+        treasuryIncomeOf[treasuryBook] += amount;
     }
 
     /// @dev The storage rule, from the books: free until `freeUntil`, then one instalment per full 30 days.
@@ -397,7 +427,7 @@ contract ArchivoHandler is Test {
             _items[tokenId].freeUntil = uint48(block.timestamp + drop.freePeriod);
             _soldIds.push(tokenId);
             liveCount += 1;
-            treasuryIncome += statedPrice;
+            _toTreasury(statedPrice);
             if (early) {
                 _boughtEarly[item.dropId][buyer] = true;
                 earlyPurchases += 1;
@@ -420,36 +450,67 @@ contract ArchivoHandler is Test {
         address actor = _actor(actorSeed);
         vm.prank(actor);
         prenda.setApprovalForAll(address(mercado), approved);
-        if (!approved && approvesMarket[actor]) revokedBook[actor] += 1;
+        if (!approved && approvesMarket[actor]) revokedForAllBook[actor] += 1;
         approvesMarket[actor] = approved;
     }
 
-    /// @dev The holder approves the market for one NFT only, or clears that approval.
-    function approveMarketForOneNft(uint256 tokenSeed, bool approved) external {
+    /// @dev The holder approves the market for one NFT only (half of the time), gives that approval to the other
+    /// market, or clears it.
+    function approveMarketForOneNft(uint256 tokenSeed, uint256 choice) external {
         (uint256 tokenId, bool ok) = _pickFrom(_soldIds, tokenSeed);
         if (!ok) return;
         ItemBook memory item = _items[tokenId];
         if (!item.sold || item.burned) return;
+        address to = choice % 4 == 0 ? address(0) : choice % 4 == 1 ? address(otherMarket) : address(mercado);
 
         vm.prank(item.holder);
-        prenda.approve(approved ? address(mercado) : address(0), tokenId);
-        if (!approved && item.approvedForMarket) revokedBook[item.holder] += 1;
-        _items[tokenId].approvedForMarket = approved;
+        prenda.approve(to, tokenId);
+        _noteApprovalOfOneNft(tokenId, to);
     }
 
-    /// @dev A seller with an open offer takes the approval for all back from the market and gives it again right
-    /// away. The offer must be dead from then on.
-    function takeApprovalBackAndGiveItAgain(uint256 tokenSeed) external {
+    /// @dev Books for the approval of one NFT: it counts as taken back from the market when the market had it and
+    /// it is cleared or goes to somebody else.
+    function _noteApprovalOfOneNft(uint256 tokenId, address to) internal {
+        if (_items[tokenId].approved == address(mercado) && to != address(mercado)) {
+            revokedForNftBook[tokenId] += 1;
+            if (to == address(0)) nftApprovalsCleared += 1;
+            else nftApprovalsReplaced += 1;
+        }
+        _items[tokenId].approved = to;
+    }
+
+    /**
+     * @dev A seller with an open offer takes an approval back from the market and gives it again right away. With
+     * `mode` 0 it is the approval for all its NFTs; with 1 the approval of the NFT on offer, cleared and given
+     * again; with 2 that same approval, given to the other market and back. The offer must be dead from then on.
+     */
+    function takeApprovalBackAndGiveItAgain(uint256 tokenSeed, uint256 mode) external {
         (uint256 tokenId, bool ok) = _pickOffered(tokenSeed);
         if (!ok) return;
         ListingBook memory listing = _listings[tokenId];
-        if (!listing.exists || !approvesMarket[listing.seller]) return;
+        if (!listing.exists) return;
+        mode = mode % 3;
 
+        if (mode == 0) {
+            if (!approvesMarket[listing.seller]) return;
+            vm.startPrank(listing.seller);
+            prenda.setApprovalForAll(address(mercado), false);
+            prenda.setApprovalForAll(address(mercado), true);
+            vm.stopPrank();
+            revokedForAllBook[listing.seller] += 1;
+            return;
+        }
+
+        // Only the holder can touch the approval of the NFT, and there has to be one to take back.
+        ItemBook memory item = _items[tokenId];
+        if (!item.sold || item.burned || item.holder != listing.seller || item.approved != address(mercado)) return;
+        address through = mode == 1 ? address(0) : address(otherMarket);
         vm.startPrank(listing.seller);
-        prenda.setApprovalForAll(address(mercado), false);
-        prenda.setApprovalForAll(address(mercado), true);
+        prenda.approve(through, tokenId);
+        prenda.approve(address(mercado), tokenId);
         vm.stopPrank();
-        revokedBook[listing.seller] += 1;
+        _noteApprovalOfOneNft(tokenId, through);
+        _noteApprovalOfOneNft(tokenId, address(mercado));
     }
 
     function list(uint256 tokenSeed, uint80 price, uint48 duration, bool byHolder, uint256 otherSeed) external {
@@ -470,23 +531,54 @@ contract ArchivoHandler is Test {
         vm.prank(caller);
         try mercado.list(tokenId, price, expiresAt) {
             if (!expected) violations.push("an offer was made by someone who could not make it");
-            _listings[tokenId] = ListingBook({
-                exists: true,
-                seller: caller,
-                price: price,
-                expiresAt: expiresAt,
-                moves: item.moves,
-                revoked: revokedBook[caller]
-            });
-            if (!_wasOffered[tokenId]) {
-                _wasOffered[tokenId] = true;
-                _offeredIds.push(tokenId);
-            }
-            _lastOffered = tokenId;
-            offersMade += 1;
+            _noteOffer(tokenId, caller, price, expiresAt);
         } catch {
             if (expected) violations.push("a valid offer could not be made");
         }
+    }
+
+    /// @dev A holder that does not approve the market for all its NFTs approves it for one of them and offers it.
+    function offerUnderTheApprovalOfOneNft(uint256 tokenSeed, uint80 price, uint48 duration) external {
+        (uint256 tokenId, bool ok) = _pickFrom(_soldIds, tokenSeed);
+        if (!ok) return;
+        address holder = _items[tokenId].holder;
+        if (!_items[tokenId].sold || _items[tokenId].burned) return;
+        price = uint80(bound(price, MIN_PRICE, MAX_PRICE));
+        uint48 expiresAt = uint48(block.timestamp + bound(duration, 1, MAX_LISTING));
+
+        vm.startPrank(holder);
+        if (approvesMarket[holder]) {
+            prenda.setApprovalForAll(address(mercado), false);
+            revokedForAllBook[holder] += 1;
+            approvesMarket[holder] = false;
+        }
+        prenda.approve(address(mercado), tokenId);
+        _noteApprovalOfOneNft(tokenId, address(mercado));
+        try mercado.list(tokenId, price, expiresAt) {
+            _noteOffer(tokenId, holder, price, expiresAt);
+        } catch {
+            violations.push("a valid offer under the approval of one NFT could not be made");
+        }
+        vm.stopPrank();
+    }
+
+    /// @dev Books for an offer that was just made: it records what the market must have recorded.
+    function _noteOffer(uint256 tokenId, address seller, uint80 price, uint48 expiresAt) internal {
+        _listings[tokenId] = ListingBook({
+            exists: true,
+            seller: seller,
+            price: price,
+            expiresAt: expiresAt,
+            moves: _items[tokenId].moves,
+            revokedForAll: revokedForAllBook[seller],
+            revokedForNft: revokedForNftBook[tokenId]
+        });
+        if (!_wasOffered[tokenId]) {
+            _wasOffered[tokenId] = true;
+            _offeredIds.push(tokenId);
+        }
+        _lastOffered = tokenId;
+        offersMade += 1;
     }
 
     function cancelListing(uint256 tokenSeed, bool bySeller, uint256 otherSeed) external {
@@ -508,51 +600,61 @@ contract ArchivoHandler is Test {
     function buyOnMarket(uint256 tokenSeed, uint256 buyerSeed, uint256 priceTrick) external {
         (uint256 tokenId, bool ok) = _pickOffered(tokenSeed);
         if (!ok) return;
-        ItemBook memory item = _items[tokenId];
         ListingBook memory listing = _listings[tokenId];
         address buyer = _actor(buyerSeed);
         // The buyer brings the listed price, or a small price when nothing is listed or to try a wrong price.
         uint256 statedPrice = !listing.exists || priceTrick % 8 == 0
             ? uint256(MIN_PRICE) + (priceTrick % 7)
             : listing.price;
-
-        // Everything about the offer itself, the NFT and the pause...
-        bool offerStands = listing.exists &&
-            block.timestamp <= listing.expiresAt &&
-            statedPrice == listing.price &&
-            item.sold &&
-            !item.burned &&
-            !pausedBook;
-        // ...the NFT is still in the hands it was in...
-        bool sameHands = item.holder == listing.seller && item.moves == listing.moves;
-        // ...and the seller did not take an approval back since.
-        bool notRevoked = revokedBook[listing.seller] == listing.revoked;
-        bool expected = offerStands && sameHands && notRevoked && _marketApprovedBy(listing.seller, tokenId);
+        Refusal refusal = _refusal(tokenId, statedPrice);
 
         vm.startPrank(buyer);
         usdt.mint(statedPrice);
         usdt.approve(address(mercado), statedPrice);
         try mercado.buy(tokenId, statedPrice) {
-            if (!expected) violations.push("a resale that should have failed went through");
+            if (refusal != Refusal.None) violations.push("a resale that should have failed went through");
             uint256 fee = (statedPrice * 2) / 100;
             expectedBalance[listing.seller] += statedPrice - fee;
-            treasuryIncome += fee;
+            _toTreasury(fee);
+            if (!approvesMarket[listing.seller]) resalesUnderOneNftApproval += 1;
             _items[tokenId].holder = buyer;
             _items[tokenId].moves += 1;
-            _items[tokenId].approvedForMarket = false;
+            _items[tokenId].approved = address(0);
             delete _listings[tokenId];
             resales += 1;
         } catch {
-            if (expected) violations.push("a valid resale failed");
-            if (offerStands && !sameHands) staleOffersRefused += 1;
-            if (offerStands && sameHands && !notRevoked && _marketApprovedBy(listing.seller, tokenId)) {
-                revokedOffersRefused += 1;
-            }
+            if (refusal == Refusal.None) violations.push("a valid resale failed");
+            else if (refusal == Refusal.Hands) staleOffersRefused += 1;
+            else if (refusal == Refusal.ForAllTakenBack) offersRefusedForAllTakenBack += 1;
+            else if (refusal == Refusal.NftTakenBack) offersRefusedForNftTakenBack += 1;
             expectedBalance[buyer] += statedPrice;
             refusedResales += 1;
         }
         usdt.approve(address(mercado), 0);
         vm.stopPrank();
+    }
+
+    /// @dev From the books: whether the offer of `tokenId` can be taken at `statedPrice`, and if not, why.
+    function _refusal(uint256 tokenId, uint256 statedPrice) internal view returns (Refusal) {
+        ItemBook memory item = _items[tokenId];
+        ListingBook memory listing = _listings[tokenId];
+        // Everything about the offer itself, the NFT and the pause...
+        if (
+            !listing.exists ||
+            block.timestamp > listing.expiresAt ||
+            statedPrice != listing.price ||
+            !item.sold ||
+            item.burned ||
+            pausedBook
+        ) return Refusal.Offer;
+        // ...the NFT is still in the hands it was in...
+        if (item.holder != listing.seller || item.moves != listing.moves) return Refusal.Hands;
+        // ...the market can still move it...
+        if (!_marketApprovedBy(listing.seller, tokenId)) return Refusal.NotApproved;
+        // ...and since the offer was made the seller took back neither the approval for all nor the one of the NFT.
+        if (revokedForAllBook[listing.seller] != listing.revokedForAll) return Refusal.ForAllTakenBack;
+        if (revokedForNftBook[tokenId] != listing.revokedForNft) return Refusal.NftTakenBack;
+        return Refusal.None;
     }
 
     /// @dev The NFT changes hands through the other market, and maybe comes back. Its offer here is left behind.
@@ -567,7 +669,7 @@ contract ArchivoHandler is Test {
         prenda.setApprovalForAll(address(otherMarket), true);
         otherMarket.move(item.holder, to, tokenId);
         _items[tokenId].moves += 1;
-        _items[tokenId].approvedForMarket = false;
+        _items[tokenId].approved = address(0);
         if (andBack) {
             vm.prank(to);
             prenda.setApprovalForAll(address(otherMarket), true);
@@ -594,9 +696,9 @@ contract ArchivoHandler is Test {
         usdt.approve(address(prenda), fee);
         try prenda.claim(tokenId, fee, bytes32(tokenId)) {
             _items[tokenId].burned = true;
-            _items[tokenId].approvedForMarket = false;
+            _items[tokenId].approved = address(0);
             liveCount -= 1;
-            treasuryIncome += fee;
+            _toTreasury(fee);
             if (fee == 0) freeClaims += 1;
             else paidClaims += 1;
         } catch {
@@ -666,6 +768,7 @@ contract ArchivoHandler is Test {
         prenda.proposeTreasury(next);
         vm.prank(next);
         prenda.acceptTreasury();
+        treasuryBook = next;
     }
 
     function letTimePass(uint32 time, bool long_) external {
@@ -707,7 +810,7 @@ contract ArchivoInvariantTest is Test {
 
         handler = new ArchivoHandler(prenda, venta, mercado, otherMarket, usdt, admin, operator, secondTreasury);
 
-        bytes4[] memory selectors = new bytes4[](17);
+        bytes4[] memory selectors = new bytes4[](18);
         selectors[0] = ArchivoHandler.createDrop.selector;
         selectors[1] = ArchivoHandler.closeDrop.selector;
         selectors[2] = ArchivoHandler.createDropWithAUsedNumber.selector;
@@ -725,6 +828,7 @@ contract ArchivoInvariantTest is Test {
         selectors[14] = ArchivoHandler.letTimePass.selector;
         selectors[15] = ArchivoHandler.waitForTheLastDropToOpen.selector;
         selectors[16] = ArchivoHandler.takeApprovalBackAndGiveItAgain.selector;
+        selectors[17] = ArchivoHandler.offerUnderTheApprovalOfOneNft.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -734,7 +838,8 @@ contract ArchivoInvariantTest is Test {
         if (handler.violationCount() != 0) revert(handler.violations(0));
     }
 
-    /// @dev No contract holds money or NFTs, and every unit of money is where the books say.
+    /// @dev No contract holds money or NFTs, and every unit of money is where the books say: each wallet has what
+    /// it must have, and each treasury has what came in while it was the one in force.
     function invariant_MoneyIsWhereTheBooksSay() public view {
         assertEq(usdt.balanceOf(address(prenda)), 0);
         assertEq(usdt.balanceOf(address(venta)), 0);
@@ -743,6 +848,8 @@ contract ArchivoInvariantTest is Test {
         assertEq(prenda.balanceOf(address(mercado)), 0);
         assertEq(prenda.balanceOf(address(otherMarket)), 0);
 
+        assertEq(usdt.balanceOf(treasury), handler.treasuryIncomeOf(treasury));
+        assertEq(usdt.balanceOf(secondTreasury), handler.treasuryIncomeOf(secondTreasury));
         assertEq(usdt.balanceOf(treasury) + usdt.balanceOf(secondTreasury), handler.treasuryIncome());
         uint256 heldByWallets;
         for (uint256 i = 0; i < handler.actorCount(); i++) {
@@ -754,7 +861,7 @@ contract ArchivoInvariantTest is Test {
     }
 
     /// @dev Every garment ever put on sale: its drop, who holds its NFT, whether it was sold, how often it changed
-    /// hands, its approval and its offer on the market.
+    /// hands, its approval, how often that approval was taken back from the market and its offer on the market.
     function invariant_EveryGarmentMatchesTheBooks() public view {
         uint256 count = handler.itemCount();
         uint256 alive;
@@ -767,16 +874,17 @@ contract ArchivoInvariantTest is Test {
             assertEq(contentHash, handler.fingerprint(tokenId, item.dropId));
             assertEq(prenda.isTokenIdUsed(tokenId), item.sold);
             assertEq(prenda.transferCountOf(tokenId), item.moves);
+            assertEq(prenda.tokenApprovalsRevoked(tokenId, address(mercado)), handler.revokedForNftBook(tokenId));
 
             if (item.sold && !item.burned) {
                 alive += 1;
                 assertEq(prenda.ownerOf(tokenId), item.holder);
                 assertEq(prenda.contentHashOf(tokenId), contentHash);
-                assertEq(prenda.getApproved(tokenId), item.approvedForMarket ? address(mercado) : address(0));
+                assertEq(prenda.getApproved(tokenId), item.approved);
                 (uint48 freeUntil, , ) = prenda.storageTermsOf(tokenId);
                 assertEq(freeUntil, item.freeUntil);
             } else {
-                assertFalse(item.approvedForMarket);
+                assertEq(item.approved, address(0));
                 try prenda.ownerOf(tokenId) returns (address) {
                     revert("an NFT that was not sold, or was burned, has a holder");
                 } catch {}
@@ -788,7 +896,8 @@ contract ArchivoInvariantTest is Test {
             assertEq(recorded.price, listing.price);
             assertEq(recorded.expiresAt, listing.expiresAt);
             assertEq(recorded.transferCount, listing.moves);
-            assertEq(recorded.approvalsRevoked, listing.revoked);
+            assertEq(recorded.approvalsForAllRevoked, listing.revokedForAll);
+            assertEq(recorded.tokenApprovalsRevoked, listing.revokedForNft);
         }
         assertEq(alive, handler.liveCount());
 
@@ -800,9 +909,10 @@ contract ArchivoInvariantTest is Test {
     }
 
     /// @dev What the books kept on the side instead of reading it from the contracts: drops closed, approvals for
-    /// the market, approvals taken back and the pause.
+    /// the market, approvals for all taken back, the pause and the treasury in force.
     function invariant_SwitchesAndApprovalsMatchTheBooks() public view {
         assertEq(prenda.paused(), handler.pausedBook());
+        assertEq(prenda.treasury(), handler.treasuryBook());
         assertEq(venta.dropCount(), handler.dropCount());
         for (uint32 dropId = 1; dropId <= handler.dropCount(); dropId++) {
             assertEq(venta.dropOf(dropId).closed, handler.dropBook(dropId).closed);
@@ -810,7 +920,7 @@ contract ArchivoInvariantTest is Test {
         for (uint256 i = 0; i < handler.actorCount(); i++) {
             address actor = handler.actors(i);
             assertEq(prenda.isApprovedForAll(actor, address(mercado)), handler.approvesMarket(actor));
-            assertEq(prenda.approvalsRevoked(actor, address(mercado)), handler.revokedBook(actor));
+            assertEq(prenda.approvalsForAllRevoked(actor, address(mercado)), handler.revokedForAllBook(actor));
         }
     }
 
@@ -861,11 +971,22 @@ contract ArchivoInvariantTest is Test {
             } else if (kind < 15) handler.waitForTheLastDropToOpen();
             else if (kind < 36) handler.buyFirstSale(a, b, c);
             else if (kind < 39) handler.approveMarket(a, b % 5 != 0);
-            else if (kind < 42) handler.approveMarketForOneNft(a, b % 3 != 0);
-            else if (kind < 56) {
+            else if (kind < 42) handler.approveMarketForOneNft(a, b);
+            else if (kind < 52) {
                 handler.list(a, uint80(b), uint48(c), c % 6 != 0, b >> 8);
-                // Now and then somebody takes the offer that was just made.
+                // Now and then somebody takes the offer that was just made, sometimes after the seller took the
+                // approval for all back and gave it again.
                 if (c % 8 < 3) handler.buyOnMarket(0, b >> 16, (c << 1) | 1);
+                else if (c % 8 < 5) {
+                    handler.takeApprovalBackAndGiveItAgain(0, 0);
+                    handler.buyOnMarket(0, b >> 16, (c << 1) | 1);
+                }
+            } else if (kind < 56) {
+                // An offer under the approval of one NFT only. Sometimes somebody takes it right away, and
+                // sometimes the seller first takes that approval back and gives it again.
+                handler.offerUnderTheApprovalOfOneNft(a, uint80(b), uint48(c));
+                if (c % 8 < 4) handler.takeApprovalBackAndGiveItAgain(0, 1 + (c >> 8) % 2);
+                if (c % 8 < 6) handler.buyOnMarket(0, b >> 16, (c << 1) | 1);
             } else if (kind < 58) handler.cancelListing(a, b % 3 != 0, c);
             else if (kind < 71) handler.buyOnMarket(a, b, c);
             else if (kind < 76) {
@@ -874,7 +995,7 @@ contract ArchivoInvariantTest is Test {
                 handler.buyOnMarket(a, b >> 16, (c << 1) | 1);
             } else if (kind < 79) {
                 // The same with an approval taken back and given again.
-                handler.takeApprovalBackAndGiveItAgain(a);
+                handler.takeApprovalBackAndGiveItAgain(a, b >> 32);
                 handler.buyOnMarket(a, b >> 16, (c << 1) | 1);
             } else if (kind < 85) handler.claim(a);
             else if (kind < 88) handler.tryWhatMustFail(a, b, c);
@@ -899,8 +1020,12 @@ contract ArchivoInvariantTest is Test {
         assertGt(handler.offersMade(), 15);
         assertGt(handler.resales(), 7);
         assertGt(handler.refusedResales(), 80);
-        assertGt(handler.staleOffersRefused(), 0);
-        assertGt(handler.revokedOffersRefused(), 0);
+        assertGt(handler.resalesUnderOneNftApproval(), 1);
+        assertGt(handler.staleOffersRefused(), 3);
+        assertGt(handler.offersRefusedForAllTakenBack(), 2);
+        assertGt(handler.offersRefusedForNftTakenBack(), 3);
+        assertGt(handler.nftApprovalsCleared(), 2);
+        assertGt(handler.nftApprovalsReplaced(), 1);
         assertGt(handler.movesOutside(), 7);
         assertGt(handler.paidClaims(), 0);
         assertGt(handler.freeClaims(), 5);

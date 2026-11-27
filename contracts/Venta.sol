@@ -13,8 +13,9 @@ import {Prenda} from "./Prenda.sol";
  * treasury and creates the NFT for the buyer in the same transaction: this contract never holds money.
  *
  * A drop cannot be changed once it is created. It opens no sooner than {openingDelay} after its creation, so that
- * a mistake or an abuse can be noticed in time. It can be closed at any moment, before or after it opens: what it
- * had not sold stops being on sale, and those garments can go into a new drop.
+ * a mistake or an abuse can be noticed in time; outside test networks that delay is at least 24 hours. A drop can
+ * be closed at any moment, before or after it opens: what it had not sold stops being on sale, and those garments
+ * can go into a new drop.
  *
  * A drop can open first for the wallets of a snapshot (the holders of $FGM at a moment chosen before the drop).
  * During that early window each of those wallets can buy one garment. After it, anyone can buy.
@@ -65,6 +66,14 @@ contract Venta {
         bool sold;
     }
 
+    /// @notice Shortest {openingDelay} this contract can be deployed with outside test networks.
+    uint48 public constant MIN_OPENING_DELAY = 24 hours;
+
+    /// @dev The two networks where a shorter delay is allowed, so that drops can be tried without waiting a day:
+    /// the testnet of Conflux eSpace and the local simulated network of the development tools.
+    uint256 private constant CONFLUX_ESPACE_TESTNET = 71;
+    uint256 private constant LOCAL_SIMULATED_NETWORK = 31337;
+
     /// @notice The NFT contract. Its treasury receives the money and its administration is this contract's.
     Prenda public immutable prenda;
 
@@ -111,6 +120,7 @@ contract Venta {
     event OperatorChanged(address indexed previousOperator, address indexed newOperator);
 
     error ZeroMinimumPrice();
+    error OpeningDelayTooShort(uint48 openingDelay, uint48 minimumAllowed);
     error NotOperator(address caller);
     error NotAdmin(address caller);
     error NotOperatorOrAdmin(address caller);
@@ -135,13 +145,18 @@ contract Venta {
     /**
      * @param prenda_ The NFT contract.
      * @param operator_ Account that creates and closes drops.
-     * @param openingDelay_ Shortest time between creating a drop and its opening. 24 hours on mainnet; shorter
-     * only on test networks.
+     * @param openingDelay_ Shortest time between creating a drop and its opening. At least {MIN_OPENING_DELAY},
+     * except on the two test networks, where it can be shorter.
      * @param minPrice_ Lowest price a garment can have. Not zero.
      * @param maxStorageFee_ Highest ceiling a drop can set for the storage fee.
      */
     constructor(Prenda prenda_, address operator_, uint48 openingDelay_, uint80 minPrice_, uint80 maxStorageFee_) {
         if (minPrice_ == 0) revert ZeroMinimumPrice();
+        if (
+            openingDelay_ < MIN_OPENING_DELAY &&
+            block.chainid != CONFLUX_ESPACE_TESTNET &&
+            block.chainid != LOCAL_SIMULATED_NETWORK
+        ) revert OpeningDelayTooShort(openingDelay_, MIN_OPENING_DELAY);
         prenda = prenda_;
         paymentToken = prenda_.paymentToken();
         openingDelay = openingDelay_;
@@ -186,18 +201,18 @@ contract Venta {
         _items[tokenId].sold = true;
         emit Purchased(item.dropId, tokenId, buyer, item.price, early);
 
+        // Everything the NFT is created with is read before the payment token is called: whatever happens during
+        // the payment, the buyer gets the storage rules and the data of the drop they named.
+        Prenda.StorageTerms memory terms = Prenda.StorageTerms({
+            freePeriod: drop.freePeriod,
+            feePerPeriod: drop.feePerPeriod,
+            maxFee: drop.maxFee
+        });
+        bytes32 contentHash = _contentHashes[tokenId];
+
         // Money first, NFT second, both in this transaction: if either fails, nothing happened.
         paymentToken.safeTransferFrom(buyer, prenda.treasury(), item.price);
-        prenda.mint(
-            buyer,
-            tokenId,
-            Prenda.StorageTerms({
-                freePeriod: drop.freePeriod,
-                feePerPeriod: drop.feePerPeriod,
-                maxFee: drop.maxFee
-            }),
-            _contentHashes[tokenId]
-        );
+        prenda.mint(buyer, tokenId, terms, contentHash);
     }
 
     // ------------------------------------------------------------------------------------------------------------
@@ -315,10 +330,14 @@ contract Venta {
     // Internal
     // ------------------------------------------------------------------------------------------------------------
 
-    /// @dev A number can go on sale if it is in no drop, or only in a drop that was closed, and no NFT ever had it.
+    /**
+     * @dev A number can go on sale if it is in no drop, or only in a drop that was closed, if this module did not
+     * sell it and if no NFT ever had it. The module's own record of the sale also covers a garment that is being
+     * paid for at this very moment, whose NFT does not exist yet.
+     */
     function _isAvailable(uint256 tokenId) private view returns (bool) {
-        uint32 current = _items[tokenId].dropId;
-        return (current == 0 || _drops[current].closed) && !prenda.isTokenIdUsed(tokenId);
+        Item storage item = _items[tokenId];
+        return (item.dropId == 0 || _drops[item.dropId].closed) && !item.sold && !prenda.isTokenIdUsed(tokenId);
     }
 
     function _setOperator(address newOperator) private {

@@ -15,9 +15,9 @@ import {Prenda} from "./Prenda.sol";
  * {Prenda}; this contract can only move an NFT whose holder approved it, and it only does so when a buyer pays the
  * price the holder asked.
  *
- * An offer stops being valid when its time runs out, when the NFT changes hands or when the seller takes an
- * approval back from this contract. An offer that stopped being valid never comes back: the seller has to make a
- * new one.
+ * An offer stops being valid when its time runs out, when the NFT changes hands, when the seller takes back from
+ * this contract the approval for all their NFTs, or when the seller takes back from it the approval of that NFT.
+ * An offer that stopped being valid never comes back: the seller has to make a new one.
  *
  * Nobody administers this contract. The fee is a constant, so it can never be raised. The treasury, the payment
  * token and the pause are those of {Prenda}.
@@ -32,16 +32,18 @@ contract Mercado {
      * @param transferCount How many times the NFT had changed hands when the offer was made. If the NFT changes
      * hands again, the offer stops being valid, even if the NFT comes back to the seller.
      * @param price Price in payment token units, fee included.
-     * @param approvalsRevoked How many times the seller had taken an approval back from this contract when the
-     * offer was made. If the seller takes one back again, the offer stops being valid, even if the approval is
-     * given again later.
+     * @param approvalsForAllRevoked How many times the seller had taken back from this contract an approval for
+     * all their NFTs when the offer was made. If the seller does it again, the offer stops being valid, even if
+     * the approval is given again later.
+     * @param tokenApprovalsRevoked The same for the approval of this one NFT.
      */
     struct Listing {
         address seller;
         uint48 expiresAt;
         uint32 transferCount;
         uint80 price;
-        uint64 approvalsRevoked;
+        uint64 approvalsForAllRevoked;
+        uint64 tokenApprovalsRevoked;
     }
 
     /// @notice Share of every sale that goes to the treasury, in hundredths of a percent: 200 is 2%.
@@ -114,7 +116,8 @@ contract Mercado {
             expiresAt: expiresAt,
             transferCount: prenda.transferCountOf(tokenId),
             price: price,
-            approvalsRevoked: prenda.approvalsRevoked(seller, address(this))
+            approvalsForAllRevoked: prenda.approvalsForAllRevoked(seller, address(this)),
+            tokenApprovalsRevoked: prenda.tokenApprovalsRevoked(tokenId, address(this))
         });
         emit Listed(tokenId, seller, price, expiresAt);
     }
@@ -141,11 +144,12 @@ contract Mercado {
         if (block.timestamp > listing.expiresAt) revert ListingExpired(tokenId, listing.expiresAt);
         if (listing.price != expectedPrice) revert PriceNotAsExpected(tokenId, listing.price, expectedPrice);
         // The offer is only good if the NFT is still in the hands it was in when the offer was made, and the
-        // seller has not taken an approval back from this contract since.
+        // seller has not taken back from this contract, since then, the approval for all or the one of this NFT.
         if (
             prenda.transferCountOf(tokenId) != listing.transferCount ||
             prenda.ownerOf(tokenId) != listing.seller ||
-            prenda.approvalsRevoked(listing.seller, address(this)) != listing.approvalsRevoked
+            prenda.approvalsForAllRevoked(listing.seller, address(this)) != listing.approvalsForAllRevoked ||
+            prenda.tokenApprovalsRevoked(tokenId, address(this)) != listing.tokenApprovalsRevoked
         ) revert ListingNoLongerValid(tokenId);
 
         address buyer = msg.sender;
